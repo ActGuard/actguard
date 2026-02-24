@@ -18,7 +18,7 @@ import openai
 
 client = openai.OpenAI()
 
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
+with BudgetGuard(user_id="alice", token_limit=1_000) as guard:
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": "Hello!"}],
