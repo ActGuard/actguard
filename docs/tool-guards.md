@@ -6,7 +6,10 @@ Tool Guards are decorators for protecting tool functions (the functions your age
 
 - `@actguard.rate_limit` for call-rate control.
 - `@actguard.circuit_breaker` for dependency-health protection.
-- `@actguard.tool(...)` as a unified decorator that composes both.
+- `@actguard.max_attempts` for per-run attempt caps.
+- `@actguard.timeout` for wall-clock execution limits.
+- `@actguard.idempotent` for at-most-once behavior by idempotency key.
+- `@actguard.tool(...)` as a unified decorator that composes guards.
 
 Enforcement is local and in-process by default. If configured, ActGuard can also report checks to the gateway for global enforcement visibility.
 
@@ -18,7 +21,7 @@ Enforcement is local and in-process by default. If configured, ActGuard can also
 actguard.configure(config: str | None = None) -> None
 ```
 
-Wires in the ActGuard gateway so `@rate_limit`, `@circuit_breaker`, and `@tool` checks can be reported for global enforcement. Decorators work without any configuration.
+Wires in the ActGuard gateway so tool-guard checks can be reported for global enforcement. Decorators work without any configuration.
 
 ### Config fields
 
@@ -28,45 +31,27 @@ Wires in the ActGuard gateway so `@rate_limit`, `@circuit_breaker`, and `@tool` 
 | `gateway_url` | `str \| None` | ActGuard gateway endpoint |
 | `api_key` | `str \| None` | API key for the gateway |
 
-### Input formats
+---
 
-**1. JSON file path**
+## RunContext
 
-```python
-import actguard
-
-actguard.configure("./actguard.json")
-```
-
-`actguard.json`:
-```json
-{
-  "agent_id": "my-agent",
-  "gateway_url": "https://gateway.actguard.io",
-  "api_key": "ag_..."
-}
-```
-
-**2. Base64-encoded JSON string**
+`max_attempts` and `idempotent` require an active run-scoped state:
 
 ```python
-import os
-import actguard
+from actguard import RunContext
 
-actguard.configure(os.environ["ACTGUARD_CONFIG"])
+with RunContext(run_id="req-42"):
+    ...
 ```
 
-**3. `ACTGUARD_CONFIG` env var**
+`RunContext` also supports async:
 
 ```python
-actguard.configure()  # reads ACTGUARD_CONFIG
+async with RunContext(run_id="req-42"):
+    ...
 ```
 
-**Clear / reset**
-
-```python
-actguard.configure(None)  # clears all config
-```
+Without an active `RunContext`, these decorators raise `MissingRuntimeContextError`.
 
 ---
 
@@ -89,26 +74,11 @@ Decorator that enforces a sliding-window call-rate limit on sync and async funct
 | `period` | `float` | `60.0` | Window length in seconds |
 | `scope` | `str \| None` | `None` | Function argument name used as key; `None` means global counter |
 
-### Example
-
-```python
-from actguard import rate_limit, RateLimitExceeded
-
-@rate_limit(max_calls=5, period=60, scope="user_id")
-def send_email(user_id: str, subject: str) -> str:
-    ...
-
-try:
-    send_email("alice", "Hello")
-except RateLimitExceeded as e:
-    print(f"Retry in {e.retry_after:.1f}s")
-```
-
 ---
 
 ## FailureKind and presets
 
-`@circuit_breaker` uses typed `FailureKind` values (no string classification API in v0.1):
+`@circuit_breaker` uses typed `FailureKind` values:
 
 - `TRANSPORT`
 - `TIMEOUT`
@@ -126,15 +96,6 @@ Preset sets:
 - `IGNORE_ON_DEFAULT = {INVALID, NOT_FOUND, CONFLICT}`
 - `FAIL_ON_STRICT = FAIL_ON_DEFAULT | {AUTH, THROTTLED}`
 - `FAIL_ON_INFRA_ONLY = {TRANSPORT, TIMEOUT}`
-
-Presets are set-like and support set operations:
-
-```python
-from actguard import FailureKind, FAIL_ON_DEFAULT, IGNORE_ON_DEFAULT
-
-fail_on = FAIL_ON_DEFAULT | {FailureKind.AUTH}
-ignore_on = IGNORE_ON_DEFAULT - {FailureKind.CONFLICT}
-```
 
 ---
 
@@ -161,39 +122,110 @@ Per-decorator CLOSED/OPEN circuit breaker for sync and async functions.
 | `fail_on` | `set[FailureKind]` | `FAIL_ON_DEFAULT` | Kinds that increment/open |
 | `ignore_on` | `set[FailureKind]` | `IGNORE_ON_DEFAULT` | Kinds that do not affect breaker state |
 
-### Default behavior
+---
 
-- Count failures for `TRANSPORT`, `TIMEOUT`, and `OVERLOADED`.
-- Ignore `INVALID`, `NOT_FOUND`, and `CONFLICT` for breaker state.
-- Short-circuit while OPEN and timeout has not elapsed.
-- Raise `CircuitOpenError` when short-circuiting.
-
-### Example: standalone
+## @actguard.max_attempts
 
 ```python
-from actguard import circuit_breaker, CircuitOpenError
-
-@circuit_breaker(name="postgres", max_fails=3, reset_timeout=60)
-def write_order(order_id: str) -> None:
-    ...
-
-try:
-    write_order("ord_123")
-except CircuitOpenError as e:
-    print(f"{e.dependency_name} unavailable; retry in {e.retry_after:.1f}s")
+actguard.max_attempts(*, calls: int)
 ```
 
-### Example: customize defaults
+Caps invocations per tool per `RunContext`.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `calls` | `int` | required | Maximum number of allowed attempts per run |
+
+Notes:
+
+- `calls` must be an integer `>= 1`.
+- Attempt count increments before the tool body runs.
+- Failed executions still consume an attempt.
+
+Example:
 
 ```python
-from actguard import FailureKind, FAIL_ON_DEFAULT, circuit_breaker
+from actguard import RunContext, max_attempts, MaxAttemptsExceeded
 
-@circuit_breaker(
-    name="payments_api",
-    fail_on=FAIL_ON_DEFAULT | {FailureKind.AUTH},
-)
-def charge_customer(user_id: str, amount_cents: int) -> None:
+@max_attempts(calls=2)
+def fetch_profile(user_id: str) -> dict:
     ...
+
+with RunContext(run_id="run-a"):
+    fetch_profile("u1")
+    fetch_profile("u1")
+    try:
+        fetch_profile("u1")
+    except MaxAttemptsExceeded as e:
+        print(e.used, e.limit, e.run_id)
+```
+
+---
+
+## @actguard.timeout
+
+```python
+actguard.timeout(seconds: float, executor: Executor | None = None)
+```
+
+Bounds tool invocation wall-clock duration for sync and async functions.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `seconds` | `float` | required | Timeout threshold in seconds |
+| `executor` | `Executor \| None` | `None` | Optional custom executor for sync functions |
+
+Notes:
+
+- Raises `ToolTimeoutError` on timeout.
+- Generator and async-generator functions are rejected at decoration time.
+- For sync functions, execution is submitted to an executor and timeout includes queue wait time.
+- If called inside `RunContext`, timeout errors include the current `run_id`.
+
+---
+
+## @actguard.idempotent
+
+```python
+actguard.idempotent(
+    *,
+    ttl_s: float = 3600,
+    on_duplicate: Literal["return", "raise"] = "return",
+    safe_exceptions: tuple = (),
+)
+```
+
+Enforces at-most-once execution per `(tool_id, idempotency_key)` within a `RunContext`.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `ttl_s` | `float` | `3600` | Lifetime of stored idempotency outcome |
+| `on_duplicate` | `"return" \| "raise"` | `"return"` | Return cached result or raise on duplicates |
+| `safe_exceptions` | `tuple` | `()` | Exceptions that clear state and allow retry |
+
+Requirements and behavior:
+
+- Decorated function must declare an `idempotency_key` parameter.
+- Caller must provide a non-empty `idempotency_key`.
+- Duplicate behavior for completed calls:
+  - `on_duplicate="return"`: returns cached result.
+  - `on_duplicate="raise"`: raises `DuplicateIdempotencyKey`.
+- If a prior attempt failed with an exception not in `safe_exceptions`, retries raise `IdempotencyOutcomeUnknown` until TTL expiry.
+- Concurrent in-flight duplicate calls raise `IdempotencyInProgress`.
+
+Example:
+
+```python
+from actguard import RunContext, idempotent
+
+@idempotent(ttl_s=600, on_duplicate="return")
+def create_order(user_id: str, *, idempotency_key: str) -> str:
+    ...
+
+with RunContext():
+    o1 = create_order("alice", idempotency_key="k-1")
+    o2 = create_order("alice", idempotency_key="k-1")
+    assert o1 == o2
 ```
 
 ---
@@ -205,45 +237,38 @@ actguard.tool(
     *,
     rate_limit: dict | None = None,
     circuit_breaker: dict | None = None,
-    idempotency_key: ... ,  # reserved, not yet active
-    policy: ... ,           # reserved, not yet active
+    max_attempts: dict | None = None,
+    timeout: float | None = None,
+    timeout_executor: Executor | None = None,
+    idempotent: dict | None = None,
+    policy: ... = None,
 )
 ```
 
 Single decorator that composes multiple guards.
 
-### Example: rate limit only
+Execution order (outermost to innermost guard):
+
+`idempotent -> max_attempts -> circuit_breaker -> rate_limit -> timeout -> fn`
+
+Example:
 
 ```python
-@actguard.tool(rate_limit={"max_calls": 5, "period": 60, "scope": "user_id"})
-def send_email(user_id: str, subject: str) -> str:
-    ...
-```
-
-### Example: circuit breaker only
-
-```python
-@actguard.tool(circuit_breaker={"name": "redis", "max_fails": 3, "reset_timeout": 30})
-def read_session(session_id: str) -> dict:
-    ...
-```
-
-### Example: combined
-
-```python
-from actguard import FAIL_ON_DEFAULT, FailureKind
+import actguard
+from actguard import RunContext
 
 @actguard.tool(
+    idempotent={"ttl_s": 600, "on_duplicate": "return"},
+    max_attempts={"calls": 3},
     rate_limit={"max_calls": 10, "period": 60, "scope": "user_id"},
-    circuit_breaker={
-        "name": "search_api",
-        "max_fails": 3,
-        "reset_timeout": 60,
-        "fail_on": FAIL_ON_DEFAULT | {FailureKind.AUTH},
-    },
+    circuit_breaker={"name": "search_api", "max_fails": 3, "reset_timeout": 60},
+    timeout=2.0,
 )
-def search_web(user_id: str, query: str) -> str:
+def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
     ...
+
+with RunContext():
+    search_web("alice", "latest", idempotency_key="r-1")
 ```
 
 > **Name collision note:** Many frameworks export their own `@tool`. Prefer `import actguard` and `@actguard.tool(...)`.
@@ -258,13 +283,17 @@ def search_web(user_id: str, query: str) -> str:
 class actguard.ToolGuardError(Exception)
 ```
 
-Base exception for tool guard failures.
+Base exception for guard-blocked execution.
 
-### RateLimitExceeded
+### ToolExecutionError
 
 ```python
-class actguard.RateLimitExceeded(ToolGuardError)
+class actguard.ToolExecutionError(Exception)
 ```
+
+Base exception for tool-execution failures (not guard blocks).
+
+### RateLimitExceeded
 
 Raised when call rate exceeds `max_calls` in `period`.
 
@@ -278,11 +307,7 @@ Raised when call rate exceeds `max_calls` in `period`.
 
 ### CircuitOpenError
 
-```python
-class actguard.CircuitOpenError(ToolGuardError)
-```
-
-Raised when a breaker is OPEN and call is short-circuited.
+Raised when a breaker is OPEN and a call is short-circuited.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -290,9 +315,54 @@ Raised when a breaker is OPEN and call is short-circuited.
 | `reset_at` | `float` | Epoch seconds when calls may resume |
 | `retry_after` | `float` | Seconds remaining until reset |
 
+### MissingRuntimeContextError
+
+Raised when `max_attempts` or `idempotent` runs without an active `RunContext`.
+
+### MaxAttemptsExceeded
+
+Raised when calls exceed `max_attempts` limit in a run.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `run_id` | `str` | Active run id |
+| `tool_name` | `str` | Tool identifier (`module:qualname`) |
+| `limit` | `int` | Allowed calls |
+| `used` | `int` | Attempts already consumed |
+
+### ToolTimeoutError
+
+Raised when `timeout` is exceeded. Inherits `ToolExecutionError`.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `tool_name` | `str` | Tool qualname |
+| `timeout_s` | `float` | Configured timeout in seconds |
+| `run_id` | `str \| None` | Run id if called inside `RunContext` |
+
+### InvalidIdempotentToolError
+
+Raised at decoration time if the function lacks an `idempotency_key` parameter.
+
+### MissingIdempotencyKeyError
+
+Raised when `idempotency_key` is missing, empty, or `None`.
+
+### IdempotencyInProgress
+
+Raised when same `(tool, key)` is already running.
+
+### DuplicateIdempotencyKey
+
+Raised when duplicate key is encountered and `on_duplicate="raise"`.
+
+### IdempotencyOutcomeUnknown
+
+Raised when a previous unsafe failure left outcome unknown until TTL expiry.
+
 ---
 
-## Stacking order
+## Stacking order with frameworks
 
 Keep framework decorators outermost and actguard decorators innermost.
 
@@ -311,6 +381,8 @@ def send_email(...):
     ...
 ```
 
+If you use `max_attempts` or `idempotent`, execute tools under `RunContext`.
+
 ---
 
 ## Framework integrations
@@ -319,21 +391,10 @@ Pattern is consistent: framework decorator outermost, actguard innermost.
 
 ### LangChain / LangGraph
 
-Circuit breaker only:
-
 ```python
 from langchain_core.tools import tool
 import actguard
 
-@tool
-@actguard.circuit_breaker(name="crm_api")
-def fetch_customer(user_id: str) -> dict:
-    ...
-```
-
-Combined:
-
-```python
 @tool
 @actguard.rate_limit(max_calls=10, period=60, scope="user_id")
 @actguard.circuit_breaker(name="crm_api")
@@ -343,8 +404,6 @@ def fetch_customer(user_id: str) -> dict:
 
 ### Pydantic AI
 
-Circuit breaker only:
-
 ```python
 from pydantic_ai import Agent
 import actguard
@@ -352,167 +411,24 @@ import actguard
 agent = Agent("openai:gpt-4o")
 
 @agent.tool
+@actguard.timeout(1.5)
 @actguard.circuit_breaker(name="mailer")
 async def send_email(ctx, user_id: str, subject: str) -> str:
-    ...
-```
-
-Combined:
-
-```python
-@agent.tool
-@actguard.rate_limit(max_calls=10, period=60)
-@actguard.circuit_breaker(name="mailer")
-async def send_email(ctx, user_id: str, subject: str) -> str:
-    ...
-```
-
-### CrewAI
-
-Circuit breaker only:
-
-```python
-from crewai.tools import tool
-import actguard
-
-@tool("Send Email Tool")
-@actguard.circuit_breaker(name="smtp")
-def send_email(user_id: str, subject: str) -> str:
-    ...
-```
-
-Combined:
-
-```python
-@tool("Send Email Tool")
-@actguard.rate_limit(max_calls=5, period=60, scope="user_id")
-@actguard.circuit_breaker(name="smtp")
-def send_email(user_id: str, subject: str) -> str:
-    ...
-```
-
-### Google ADK (Python)
-
-Circuit breaker only:
-
-```python
-from google.adk.agents import Agent
-import actguard
-
-@actguard.circuit_breaker(name="inventory_rpc")
-def get_stock(sku: str) -> int:
-    ...
-
-agent = Agent(name="my-agent", model="gemini-2.0-flash", tools=[get_stock])
-```
-
-Combined:
-
-```python
-@actguard.rate_limit(max_calls=20, period=60, scope="user_id")
-@actguard.circuit_breaker(name="inventory_rpc")
-def get_stock(user_id: str, sku: str) -> int:
     ...
 ```
 
 ### OpenAI Agents SDK
-
-Circuit breaker only:
 
 ```python
 from agents import function_tool
 import actguard
 
 @function_tool
-@actguard.circuit_breaker(name="ticketing_api")
+@actguard.tool(
+    max_attempts={"calls": 3},
+    timeout=2.0,
+    circuit_breaker={"name": "ticketing_api", "max_fails": 3},
+)
 def create_ticket(user_id: str, title: str) -> str:
-    ...
-```
-
-Combined:
-
-```python
-@function_tool
-@actguard.rate_limit(max_calls=10, period=60, scope="user_id")
-@actguard.circuit_breaker(name="ticketing_api")
-def create_ticket(user_id: str, title: str) -> str:
-    ...
-```
-
-### smolagents
-
-Circuit breaker only:
-
-```python
-from smolagents import tool, CodeAgent
-import actguard
-
-@tool
-@actguard.circuit_breaker(name="calendar_api")
-def schedule(user_id: str, slot: str) -> str:
-    """Schedule a slot for a user."""
-    ...
-
-agent = CodeAgent(tools=[schedule], model=...)
-```
-
-Combined:
-
-```python
-@tool
-@actguard.rate_limit(max_calls=5, period=60, scope="user_id")
-@actguard.circuit_breaker(name="calendar_api")
-def schedule(user_id: str, slot: str) -> str:
-    """Schedule a slot for a user."""
-    ...
-```
-
-### AutoGen
-
-Circuit breaker only:
-
-```python
-from autogen import ConversableAgent
-import actguard
-
-@actguard.circuit_breaker(name="warehouse_api")
-def reserve_item(user_id: str, sku: str) -> bool:
-    ...
-
-agent = ConversableAgent(name="agent", llm_config={...})
-agent.register_for_llm(description="Reserve warehouse item")(reserve_item)
-agent.register_for_execution()(reserve_item)
-```
-
-Combined:
-
-```python
-@actguard.rate_limit(max_calls=5, period=60)
-@actguard.circuit_breaker(name="warehouse_api")
-def reserve_item(user_id: str, sku: str) -> bool:
-    ...
-```
-
-### Agno (formerly phidata)
-
-Circuit breaker only:
-
-```python
-from agno.agent import Agent
-import actguard
-
-@actguard.circuit_breaker(name="pricing_service")
-def quote(user_id: str, sku: str) -> dict:
-    ...
-
-agent = Agent(tools=[quote], model=...)
-```
-
-Combined:
-
-```python
-@actguard.rate_limit(max_calls=10, period=60, scope="user_id")
-@actguard.circuit_breaker(name="pricing_service")
-def quote(user_id: str, sku: str) -> dict:
     ...
 ```

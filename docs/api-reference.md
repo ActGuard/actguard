@@ -25,8 +25,6 @@ At least one limit should be set. If both are `None`, usage is tracked but no er
 
 ### Properties
 
-These are readable after the context block exits (or during it):
-
 | Property | Type | Description |
 |----------|------|-------------|
 | `tokens_used` | `int` | Total tokens consumed so far (input + output across all calls). |
@@ -34,41 +32,6 @@ These are readable after the context block exits (or during it):
 | `user_id` | `str` | The `user_id` passed to the constructor. |
 | `token_limit` | `int \| None` | The `token_limit` passed to the constructor. |
 | `usd_limit` | `float \| None` | The `usd_limit` passed to the constructor. |
-
-### Sync context manager
-
-```python
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    ...
-
-print(guard.usd_used)
-```
-
-### Async context manager
-
-```python
-async with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    ...
-
-print(guard.usd_used)
-```
-
-### Example
-
-```python
-from actguard import BudgetGuard, BudgetExceededError
-
-try:
-    with BudgetGuard(user_id="alice", token_limit=500, usd_limit=0.05) as guard:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
-except BudgetExceededError as e:
-    print(f"Stopped: {e.limit_type} limit hit")
-finally:
-    print(f"Tokens: {guard.tokens_used}  USD: ${guard.usd_used:.6f}")
-```
 
 ---
 
@@ -78,7 +41,7 @@ finally:
 class actguard.BudgetExceededError(Exception)
 ```
 
-Raised by `BudgetGuard` when a token or USD limit is exceeded. The exception message is human-readable; detailed attributes are available for programmatic handling.
+Raised by `BudgetGuard` when a token or USD limit is exceeded.
 
 ### Attributes
 
@@ -91,21 +54,33 @@ Raised by `BudgetGuard` when a token or USD limit is exceeded. The exception mes
 | `usd_limit` | `float \| None` | The USD limit that was set (may be `None` if no USD limit). |
 | `limit_type` | `Literal["token", "usd"]` | Which limit triggered the error. |
 
-### Example
+---
+
+## Tool Runtime
+
+### RunContext
 
 ```python
-from actguard import BudgetExceededError
-
-try:
-    with BudgetGuard(user_id="bob", usd_limit=0.01) as guard:
-        client.chat.completions.create(...)
-except BudgetExceededError as e:
-    match e.limit_type:
-        case "usd":
-            print(f"Cost limit: spent ${e.usd_used:.4f} of ${e.usd_limit:.4f}")
-        case "token":
-            print(f"Token limit: used {e.tokens_used} of {e.token_limit}")
+class actguard.RunContext(*, run_id: str | None = None)
 ```
+
+Context manager for tool runtime state (`max_attempts`, `idempotent`). Supports sync and async usage.
+
+### Constructor params
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `run_id` | `str \| None` | auto-generated UUID | Optional explicit run identifier used by runtime exceptions |
+
+### Methods
+
+| Method | Signature | Description |
+|---|---|---|
+| enter | `__enter__() -> RunContext` | Activate run state |
+| exit | `__exit__(exc_type, exc_val, exc_tb) -> None` | Restore previous run state |
+| async enter | `__aenter__() -> RunContext` | Async enter |
+| async exit | `__aexit__(exc_type, exc_val, exc_tb) -> None` | Async exit |
+| attempts | `get_attempt_count(tool_id: str) -> int` | Return current attempt count for a tool id in this context |
 
 ---
 
@@ -118,12 +93,6 @@ actguard.configure(config: str | None = None) -> None
 ```
 
 Wires in the ActGuard gateway for global enforcement reporting. Call once at startup; optional.
-
-#### Parameters
-
-| Parameter | Type | Description |
-|---|---|---|
-| `config` | `str \| None` | JSON file path, base64-encoded JSON string, or `None` to clear. If `None` and `ACTGUARD_CONFIG` is set, that value is used. |
 
 ---
 
@@ -139,8 +108,6 @@ actguard.rate_limit(
 ```
 
 Decorator that enforces a sliding-window call-rate limit on sync and async functions.
-
-#### Parameters
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -181,20 +148,7 @@ actguard.FAIL_ON_STRICT
 actguard.FAIL_ON_INFRA_ONLY
 ```
 
-Set-like presets of `FailureKind` values:
-
-- `FAIL_ON_DEFAULT = {TRANSPORT, TIMEOUT, OVERLOADED}`
-- `IGNORE_ON_DEFAULT = {INVALID, NOT_FOUND, CONFLICT}`
-- `FAIL_ON_STRICT = FAIL_ON_DEFAULT | {AUTH, THROTTLED}`
-- `FAIL_ON_INFRA_ONLY = {TRANSPORT, TIMEOUT}`
-
-Example customization:
-
-```python
-from actguard import FailureKind, FAIL_ON_DEFAULT
-
-fail_on = FAIL_ON_DEFAULT | {FailureKind.AUTH}
-```
+Set-like presets of `FailureKind` values.
 
 ---
 
@@ -213,8 +167,6 @@ actguard.circuit_breaker(
 
 Circuit breaker decorator for sync and async functions.
 
-#### Parameters
-
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | required | Dependency name |
@@ -225,6 +177,70 @@ Circuit breaker decorator for sync and async functions.
 
 ---
 
+### @max_attempts
+
+```python
+actguard.max_attempts(*, calls: int)
+```
+
+Decorator that limits invocations per tool per active `RunContext`.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `calls` | `int` | required | Max allowed attempts per run |
+
+Raises `MissingRuntimeContextError` if no `RunContext` is active.
+
+---
+
+### @timeout
+
+```python
+actguard.timeout(seconds: float, executor: Executor | None = None)
+```
+
+Decorator that bounds tool wall-clock runtime.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `seconds` | `float` | required | Timeout threshold in seconds |
+| `executor` | `Executor \| None` | `None` | Optional executor for sync tool execution |
+
+Raises `ToolTimeoutError` when exceeded.
+
+### shutdown()
+
+```python
+actguard.shutdown(wait: bool = True) -> None
+```
+
+Shuts down the shared timeout executor used by `@timeout` when no custom executor is passed.
+
+---
+
+### @idempotent
+
+```python
+actguard.idempotent(
+    *,
+    ttl_s: float = 3600,
+    on_duplicate: Literal["return", "raise"] = "return",
+    safe_exceptions: tuple = (),
+)
+```
+
+Decorator enforcing at-most-once execution per `(tool_id, idempotency_key)` in an active `RunContext`.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `ttl_s` | `float` | `3600` | TTL for idempotency entries |
+| `on_duplicate` | `"return" \| "raise"` | `"return"` | Return cached result or raise |
+| `safe_exceptions` | `tuple` | `()` | Exceptions that clear state and allow retry |
+
+Requires the decorated function to include an `idempotency_key` parameter.
+
+---
+
 ### @tool
 
 ```python
@@ -232,23 +248,33 @@ actguard.tool(
     *,
     rate_limit: dict | None = None,
     circuit_breaker: dict | None = None,
-    idempotency_key: ... ,
-    policy: ... ,
+    max_attempts: dict | None = None,
+    timeout: float | None = None,
+    timeout_executor: Executor | None = None,
+    idempotent: dict | None = None,
+    policy: ... = None,
 )
 ```
 
 Unified decorator that composes multiple guards.
 
-#### Kwargs
-
 | Kwarg | Type | Description |
 |---|---|---|
-| `rate_limit` | `dict \| None` | Rate-limit config: `max_calls`, `period`, `scope` |
-| `circuit_breaker` | `dict \| None` | Circuit-breaker config: `name`, `max_fails`, `reset_timeout`, `fail_on`, `ignore_on` |
-| `idempotency_key` | — | Reserved; not yet active |
-| `policy` | — | Reserved; not yet active |
+| `rate_limit` | `dict \| None` | `max_calls`, `period`, `scope` |
+| `circuit_breaker` | `dict \| None` | `name`, `max_fails`, `reset_timeout`, `fail_on`, `ignore_on` |
+| `max_attempts` | `dict \| None` | `calls` |
+| `timeout` | `float \| None` | Timeout in seconds |
+| `timeout_executor` | `Executor \| None` | Custom executor for sync timeout execution |
+| `idempotent` | `dict \| None` | `ttl_s`, `on_duplicate`, `safe_exceptions` |
+| `policy` | — | Reserved stub |
+
+Execution order:
+
+`idempotent -> max_attempts -> circuit_breaker -> rate_limit -> timeout -> fn`
 
 ---
+
+## Exceptions
 
 ### ToolGuardError
 
@@ -256,9 +282,15 @@ Unified decorator that composes multiple guards.
 class actguard.ToolGuardError(Exception)
 ```
 
-Base exception class for tool-guard failures. Catch this for generic guard handling.
+Base class for guard-blocked tool execution.
 
----
+### ToolExecutionError
+
+```python
+class actguard.ToolExecutionError(Exception)
+```
+
+Base class for tool execution failures.
 
 ### RateLimitExceeded
 
@@ -266,19 +298,13 @@ Base exception class for tool-guard failures. Catch this for generic guard handl
 class actguard.RateLimitExceeded(ToolGuardError)
 ```
 
-Raised when a `@rate_limit`-decorated function exceeds its call limit.
-
-#### Attributes
-
-| Attribute | Type | Description |
-|---|---|---|
-| `func_name` | `str` | Name of the decorated function |
-| `scope_value` | `str \| None` | Runtime value of the scoped argument, or global scope |
-| `max_calls` | `int` | Configured call limit |
-| `period` | `float` | Configured window in seconds |
-| `retry_after` | `float` | Seconds until next call is safe |
-
----
+| Attribute | Type |
+|---|---|
+| `func_name` | `str` |
+| `scope_value` | `str \| None` |
+| `max_calls` | `int` |
+| `period` | `float` |
+| `retry_after` | `float` |
 
 ### CircuitOpenError
 
@@ -286,12 +312,81 @@ Raised when a `@rate_limit`-decorated function exceeds its call limit.
 class actguard.CircuitOpenError(ToolGuardError)
 ```
 
-Raised when a `@circuit_breaker` is OPEN and a call is short-circuited.
+| Attribute | Type |
+|---|---|
+| `dependency_name` | `str` |
+| `reset_at` | `float` |
+| `retry_after` | `float` |
 
-#### Attributes
+### MissingRuntimeContextError
 
-| Attribute | Type | Description |
-|---|---|---|
-| `dependency_name` | `str` | Breaker dependency name |
-| `reset_at` | `float` | Epoch seconds when the breaker can be retried |
-| `retry_after` | `float` | Seconds until reset |
+```python
+class actguard.MissingRuntimeContextError(ToolGuardError)
+```
+
+Raised when run-state decorators are called without `RunContext`.
+
+### MaxAttemptsExceeded
+
+```python
+class actguard.MaxAttemptsExceeded(ToolGuardError)
+```
+
+| Attribute | Type |
+|---|---|
+| `run_id` | `str` |
+| `tool_name` | `str` |
+| `limit` | `int` |
+| `used` | `int` |
+
+### ToolTimeoutError
+
+```python
+class actguard.ToolTimeoutError(ToolExecutionError)
+```
+
+| Attribute | Type |
+|---|---|
+| `tool_name` | `str` |
+| `timeout_s` | `float` |
+| `run_id` | `str \| None` |
+
+### InvalidIdempotentToolError
+
+```python
+class actguard.InvalidIdempotentToolError(ActGuardError)
+```
+
+Raised when a decorated function lacks `idempotency_key`.
+
+### MissingIdempotencyKeyError
+
+```python
+class actguard.MissingIdempotencyKeyError(ToolGuardError)
+```
+
+Raised when `idempotency_key` is empty or missing.
+
+### IdempotencyInProgress
+
+```python
+class actguard.IdempotencyInProgress(ToolGuardError)
+```
+
+Raised when the same key is currently in progress.
+
+### DuplicateIdempotencyKey
+
+```python
+class actguard.DuplicateIdempotencyKey(ToolGuardError)
+```
+
+Raised on duplicate completed key when `on_duplicate="raise"`.
+
+### IdempotencyOutcomeUnknown
+
+```python
+class actguard.IdempotencyOutcomeUnknown(ToolGuardError)
+```
+
+Raised when previous unsafe failure left outcome unknown until TTL expiry.

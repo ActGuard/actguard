@@ -79,6 +79,33 @@ with BudgetGuard(user_id="outer", usd_limit=1.00) as outer:
 
 ---
 
+## Tool runtime context
+
+`RunContext` provides per-run state for tool decorators that need cross-call memory.
+
+```python
+from actguard import RunContext
+
+with RunContext(run_id="req-123"):
+    ...
+```
+
+### What state is stored
+
+- Attempt counters per tool (`max_attempts`)
+- Idempotency records per `(tool_id, idempotency_key)` (`idempotent`)
+- Run identifier used by related exceptions
+
+### Isolation semantics
+
+- **Per run**: a new `RunContext` starts with fresh attempt counters and idempotency state.
+- **Nested contexts**: inner `RunContext` has independent state; on exit, outer state is restored.
+- **Async support**: `RunContext` supports `with` and `async with`.
+
+`timeout` does not require `RunContext`, but if one is active it includes `run_id` in `ToolTimeoutError`.
+
+---
+
 ## Patching
 
 `BudgetGuard.__enter__()` calls `patch_all()` once per process, which monkey-patches the transport layer of each installed LLM SDK. The patch is idempotent — calling it multiple times has no effect.

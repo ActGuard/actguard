@@ -120,6 +120,22 @@ actguard.configure()
 actguard.configure(None)
 ```
 
+## RunContext for runtime-state decorators
+
+`max_attempts` and `idempotent` rely on run-scoped state, so they require an active `RunContext`:
+
+```python
+from actguard import RunContext, max_attempts
+
+@max_attempts(calls=2)
+def lookup_customer(customer_id: str) -> dict:
+    ...
+
+with RunContext(run_id="req-123"):
+    lookup_customer("cus_1")
+    lookup_customer("cus_1")
+```
+
 ## Rate-limit a tool
 
 Add a per-user rate limit to any tool function with a single decorator:
@@ -156,41 +172,72 @@ except CircuitOpenError as e:
     print(f"{e.dependency_name} open; retry in {e.retry_after:.1f}s")
 ```
 
-## Combine rate limit + circuit breaker
+## Time-bound a tool
 
-Use stacked decorators:
+Use `timeout` to bound wall-clock runtime for sync or async tools:
 
 ```python
-import actguard
+from actguard import timeout, ToolTimeoutError
 
-@actguard.rate_limit(max_calls=10, period=60, scope="user_id")
-@actguard.circuit_breaker(name="search_api", max_fails=3, reset_timeout=60)
-def search_web(user_id: str, query: str) -> str:
+@timeout(1.5)
+def call_slow_dependency() -> str:
     ...
+
+try:
+    call_slow_dependency()
+except ToolTimeoutError as e:
+    print(f"{e.tool_name} exceeded {e.timeout_s}s")
 ```
 
-Or use the unified decorator:
+## Deduplicate with idempotency keys
+
+Use `idempotent` to enforce at-most-once execution per `(tool, idempotency_key)` in a run:
+
+```python
+from actguard import RunContext, idempotent
+
+@idempotent(ttl_s=600)
+def create_invoice(user_id: str, amount_cents: int, *, idempotency_key: str) -> str:
+    ...
+
+with RunContext():
+    invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
+    same_invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
+```
+
+## Combine guards with @actguard.tool
+
+Use the unified decorator when you want one declaration:
 
 ```python
 import actguard
+from actguard import RunContext
 
 @actguard.tool(
+    idempotent={"ttl_s": 600, "on_duplicate": "return"},
+    max_attempts={"calls": 3},
     rate_limit={"max_calls": 10, "period": 60, "scope": "user_id"},
     circuit_breaker={"name": "search_api", "max_fails": 3, "reset_timeout": 60},
+    timeout=2.0,
 )
-def search_web(user_id: str, query: str) -> str:
+def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
     ...
+
+with RunContext():
+    search_web("alice", "latest earnings", idempotency_key="req-1")
 ```
 
 ## Which guard should I use?
 
 - Use `rate_limit` to cap request volume per window.
 - Use `circuit_breaker` to stop hammering unhealthy dependencies.
-- Use both when you need both caller fairness and dependency protection.
+- Use `max_attempts` to cap retries/loops per run.
+- Use `timeout` to bound wall-clock latency.
+- Use `idempotent` to deduplicate side-effectful tools.
 
 ## What's next
 
 - [Core Concepts](./concepts.md) - understand how limits and isolation work
-- [Tool Guards](./tool-guards.md) - rate limiting, circuit breaker, and framework integrations
+- [Tool Guards](./tool-guards.md) - tool decorator behavior and framework integrations
 - [Integrations](./integrations/openai.md) - provider-specific requirements
 - [API Reference](./api-reference.md) - full parameter and exception reference
