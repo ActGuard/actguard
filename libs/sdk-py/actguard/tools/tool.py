@@ -3,24 +3,35 @@ def tool(
     *,
     rate_limit=None,
     circuit_breaker=None,
-    idempotency_key=None,
+    max_attempts=None,
+    timeout=None,
+    timeout_executor=None,
+    idempotent=None,
     policy=None,
 ):
     """Unified decorator. Each kwarg maps to the corresponding standalone decorator.
 
-    Unspecified guards are not applied. Execution order: policy → idempotency →
-    rate_limit → circuit_breaker → fn.
+    Unspecified guards are not applied. Execution order:
+    idempotent → max_attempts → circuit_breaker → rate_limit → timeout → fn.
     """
     if fn is None:
         return lambda f: tool(
             f,
             rate_limit=rate_limit,
             circuit_breaker=circuit_breaker,
-            idempotency_key=idempotency_key,
+            max_attempts=max_attempts,
+            timeout=timeout,
+            timeout_executor=timeout_executor,
+            idempotent=idempotent,
             policy=policy,
         )
 
     wrapped = fn
+
+    if timeout is not None:
+        from .timeout import timeout as _to
+
+        wrapped = _to(timeout, executor=timeout_executor)(wrapped)
 
     if circuit_breaker is not None:
         from .circuit_breaker import circuit_breaker as _cb
@@ -32,6 +43,16 @@ def tool(
 
         wrapped = _rl(wrapped, **rate_limit)
 
-    # idempotency, policy: stubs reserved for future phases
+    if max_attempts is not None:
+        from .max_attempts import max_attempts as _ma
+
+        wrapped = _ma(wrapped, **max_attempts)
+
+    if idempotent is not None:
+        from .idempotent import idempotent as _idem
+
+        wrapped = _idem(wrapped, **idempotent)
+
+    # policy: stub reserved for future phases
 
     return wrapped
