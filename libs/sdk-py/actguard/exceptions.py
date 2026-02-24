@@ -1,6 +1,39 @@
 from typing import Literal, Optional
 
 
+class ToolGuardError(Exception):
+    """Base class for all actguard tool guardrail errors."""
+
+
+class RateLimitExceeded(ToolGuardError):
+    def __init__(self, *, func_name, scope_value, max_calls, period, retry_after):
+        self.func_name = func_name
+        self.scope_value = scope_value
+        self.max_calls = max_calls
+        self.period = period
+        self.retry_after = retry_after  # seconds until retry is safe
+        super().__init__(
+            f"Rate limit exceeded for '{func_name}' "
+            f"(scope={scope_value!r}): {max_calls} calls per {period}s. "
+            f"Retry after {retry_after:.1f}s."
+        )
+
+
+class CircuitOpenError(ToolGuardError):
+    """Raised when a circuit breaker short-circuits calls for a dependency."""
+
+    def __init__(self, *, dependency_name: str, reset_at: float):
+        import time
+
+        self.dependency_name = dependency_name
+        self.reset_at = reset_at
+        self.retry_after = max(0.0, reset_at - time.time())
+        super().__init__(
+            f"Circuit open for '{dependency_name}'. "
+            f"Retry after {self.retry_after:.1f}s."
+        )
+
+
 class BudgetExceededError(Exception):
     """Raised when a BudgetGuard limit (token or USD) is exceeded."""
 
