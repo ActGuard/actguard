@@ -1,0 +1,3 @@
+actguard
+google-adk
+google-genai>=1.47.0

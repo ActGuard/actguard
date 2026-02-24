@@ -1,0 +1,3 @@
+actguard
+openai>=1.76.0
+langgraph>=0.2.0
