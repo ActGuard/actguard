@@ -106,3 +106,192 @@ except BudgetExceededError as e:
         case "token":
             print(f"Token limit: used {e.tokens_used} of {e.token_limit}")
 ```
+
+---
+
+## Tool Guards
+
+### configure()
+
+```python
+actguard.configure(config: str | None = None) -> None
+```
+
+Wires in the ActGuard gateway for global enforcement reporting. Call once at startup; optional.
+
+#### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `config` | `str \| None` | JSON file path, base64-encoded JSON string, or `None` to clear. If `None` and `ACTGUARD_CONFIG` is set, that value is used. |
+
+---
+
+### @rate_limit
+
+```python
+actguard.rate_limit(
+    *,
+    max_calls: int = 10,
+    period: float = 60.0,
+    scope: str | None = None,
+)
+```
+
+Decorator that enforces a sliding-window call-rate limit on sync and async functions.
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_calls` | `int` | `10` | Maximum calls allowed within `period` |
+| `period` | `float` | `60.0` | Sliding-window length in seconds |
+| `scope` | `str \| None` | `None` | Argument name used as counter key; `None` means one global counter |
+
+---
+
+### FailureKind
+
+```python
+class actguard.FailureKind(str, Enum)
+```
+
+Stable failure taxonomy used by `@circuit_breaker`.
+
+Members:
+
+- `TRANSPORT`
+- `TIMEOUT`
+- `OVERLOADED`
+- `THROTTLED`
+- `AUTH`
+- `INVALID`
+- `NOT_FOUND`
+- `CONFLICT`
+- `UNKNOWN`
+
+---
+
+### Preset constants
+
+```python
+actguard.FAIL_ON_DEFAULT
+actguard.IGNORE_ON_DEFAULT
+actguard.FAIL_ON_STRICT
+actguard.FAIL_ON_INFRA_ONLY
+```
+
+Set-like presets of `FailureKind` values:
+
+- `FAIL_ON_DEFAULT = {TRANSPORT, TIMEOUT, OVERLOADED}`
+- `IGNORE_ON_DEFAULT = {INVALID, NOT_FOUND, CONFLICT}`
+- `FAIL_ON_STRICT = FAIL_ON_DEFAULT | {AUTH, THROTTLED}`
+- `FAIL_ON_INFRA_ONLY = {TRANSPORT, TIMEOUT}`
+
+Example customization:
+
+```python
+from actguard import FailureKind, FAIL_ON_DEFAULT
+
+fail_on = FAIL_ON_DEFAULT | {FailureKind.AUTH}
+```
+
+---
+
+### @circuit_breaker
+
+```python
+actguard.circuit_breaker(
+    *,
+    name: str,
+    max_fails: int = 3,
+    reset_timeout: float = 60.0,
+    fail_on: set[FailureKind] = FAIL_ON_DEFAULT,
+    ignore_on: set[FailureKind] = IGNORE_ON_DEFAULT,
+)
+```
+
+Circuit breaker decorator for sync and async functions.
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | required | Dependency name |
+| `max_fails` | `int` | `3` | Counted failures before OPEN |
+| `reset_timeout` | `float` | `60.0` | Seconds before calls are allowed again |
+| `fail_on` | `set[FailureKind]` | `FAIL_ON_DEFAULT` | Kinds that increment/open |
+| `ignore_on` | `set[FailureKind]` | `IGNORE_ON_DEFAULT` | Kinds that do not affect breaker state |
+
+---
+
+### @tool
+
+```python
+actguard.tool(
+    *,
+    rate_limit: dict | None = None,
+    circuit_breaker: dict | None = None,
+    idempotency_key: ... ,
+    policy: ... ,
+)
+```
+
+Unified decorator that composes multiple guards.
+
+#### Kwargs
+
+| Kwarg | Type | Description |
+|---|---|---|
+| `rate_limit` | `dict \| None` | Rate-limit config: `max_calls`, `period`, `scope` |
+| `circuit_breaker` | `dict \| None` | Circuit-breaker config: `name`, `max_fails`, `reset_timeout`, `fail_on`, `ignore_on` |
+| `idempotency_key` | — | Reserved; not yet active |
+| `policy` | — | Reserved; not yet active |
+
+---
+
+### ToolGuardError
+
+```python
+class actguard.ToolGuardError(Exception)
+```
+
+Base exception class for tool-guard failures. Catch this for generic guard handling.
+
+---
+
+### RateLimitExceeded
+
+```python
+class actguard.RateLimitExceeded(ToolGuardError)
+```
+
+Raised when a `@rate_limit`-decorated function exceeds its call limit.
+
+#### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `func_name` | `str` | Name of the decorated function |
+| `scope_value` | `str \| None` | Runtime value of the scoped argument, or global scope |
+| `max_calls` | `int` | Configured call limit |
+| `period` | `float` | Configured window in seconds |
+| `retry_after` | `float` | Seconds until next call is safe |
+
+---
+
+### CircuitOpenError
+
+```python
+class actguard.CircuitOpenError(ToolGuardError)
+```
+
+Raised when a `@circuit_breaker` is OPEN and a call is short-circuited.
+
+#### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `dependency_name` | `str` | Breaker dependency name |
+| `reset_at` | `float` | Epoch seconds when the breaker can be retried |
+| `retry_after` | `float` | Seconds until reset |

@@ -1,6 +1,6 @@
 # Overview
 
-**actguard** is a lightweight Python SDK that enforces token and cost budgets across LLM API calls — without changing your existing client code.
+**actguard** is a lightweight Python SDK that enforces token and cost budgets across LLM API calls without changing your existing client code.
 
 It works by patching the official OpenAI, Anthropic, and Google Generative AI SDKs at the transport layer. Wrap any block of code in a `BudgetGuard` context manager and actguard transparently counts tokens and USD spend in real time, raising `BudgetExceededError` the moment a limit is hit.
 
@@ -31,12 +31,14 @@ No configuration file, no proxy, no side-car process. Budget state lives in a Py
 
 ## Key features
 
-- **Token and USD limits** — set one, the other, or both.
-- **Zero code changes to LLM calls** — the patch is applied once when you enter the `with` block.
-- **Streaming support** — usage is captured from final stream chunks; the stream is otherwise untouched.
-- **Async support** — `BudgetGuard` is both a sync and async context manager.
-- **Multi-provider** — OpenAI, Anthropic, Google Generative AI out of the box.
-- **Context-var isolation** — nested or concurrent guards don't interfere with each other.
+- **Token and USD limits**: set one, the other, or both.
+- **Zero code changes to LLM calls**: patch is applied once when entering the `with` block.
+- **Streaming support**: usage is captured from final stream chunks; stream contents are untouched.
+- **Async support**: `BudgetGuard` is both a sync and async context manager.
+- **Multi-provider**: OpenAI, Anthropic, Google Generative AI out of the box.
+- **Context-var isolation**: nested or concurrent guards do not interfere.
+- **Tool guards**: rate limiting and circuit breaker decorators for tool functions.
+- **Gateway-ready**: optionally report tool checks to the ActGuard platform.
 
 ## How it works
 
@@ -57,7 +59,8 @@ each patched call:
 
 ## Next steps
 
-- [Getting Started](./getting-started.md) — installation options and first examples
-- [Core Concepts](./concepts.md) — limits, context isolation, streaming
-- [Integrations](./integrations/openai.md) — provider-specific notes and requirements
-- [API Reference](./api-reference.md) — full `BudgetGuard` and `BudgetExceededError` reference
+- [Getting Started](./getting-started.md) - installation options and first examples
+- [Core Concepts](./concepts.md) - limits, context isolation, streaming
+- [Tool Guards](./tool-guards.md) - rate limiting, circuit breaker, and framework integrations
+- [Integrations](./integrations/openai.md) - provider-specific notes and requirements
+- [API Reference](./api-reference.md) - full API and exception reference

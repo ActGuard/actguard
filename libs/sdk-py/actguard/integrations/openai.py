@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from typing import Iterator
 
 from actguard.core.pricing import get_cost
@@ -6,6 +7,13 @@ from actguard.core.state import get_current_state
 from actguard.exceptions import BudgetExceededError
 
 _patched = False
+
+
+def _parse_major_minor(version: str):
+    m = re.match(r"^(\d+)\.(\d+)", version or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
 
 
 def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> None:
@@ -102,6 +110,8 @@ class _WrappedAsyncStream:
         return self
 
     async def __anext__(self):
+        if self._aiter is None:
+            self._aiter = self._inner.__aiter__()
         chunk = await self._aiter.__anext__()  # StopAsyncIteration propagates naturally
         tokens = _try_stream_usage(chunk)
         if tokens is not None:
@@ -121,8 +131,8 @@ def patch_openai() -> None:
         return
 
     import openai as _oai_pkg
-    _ver = tuple(int(x) for x in _oai_pkg.__version__.split(".")[:2])
-    if _ver < (1, 76):
+    _ver = _parse_major_minor(getattr(_oai_pkg, "__version__", ""))
+    if _ver is not None and _ver < (1, 76):
         import warnings
         warnings.warn(
             f"actguard requires openai>=1.76.0; detected {_oai_pkg.__version__}. "

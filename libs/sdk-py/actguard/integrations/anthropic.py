@@ -115,6 +115,18 @@ class _WrappedAsyncStream:
         return await self._inner.__aexit__(*args)
 
 
+def _is_messages_endpoint(options) -> bool:
+    return "/v1/messages" in str(getattr(options, "url", ""))
+
+
+def _get_model_from_options(options) -> str:
+    if isinstance(options.json_data, dict):
+        model = options.json_data.get("model", "")
+        if isinstance(model, str):
+            return model
+    return ""
+
+
 def patch_anthropic() -> None:
     global _patched
     if _patched:
@@ -122,26 +134,26 @@ def patch_anthropic() -> None:
     if importlib.util.find_spec("anthropic") is None:
         return
 
-    from anthropic.resources.messages import Messages, AsyncMessages
+    from anthropic._base_client import SyncAPIClient, AsyncAPIClient
 
-    _orig_create = Messages.create
-    _orig_async_create = AsyncMessages.create
+    _orig_request = SyncAPIClient.request
+    _orig_async_request = AsyncAPIClient.request
 
-    def _create(self, *args, **kwargs):
+    def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_current_state()
         if state is None:
-            return _orig_create(self, *args, **kwargs)
+            return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        if not _is_messages_endpoint(options):
+            return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
 
         _check_limits(state)
-
-        stream = kwargs.get("stream", False)
-        model = kwargs.get("model", "")
+        model = _get_model_from_options(options)
 
         if stream:
-            result = _orig_create(self, *args, **kwargs)
+            result = _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
             return _WrappedSyncStream(result, model, state)
 
-        response = _orig_create(self, *args, **kwargs)
+        response = _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
         if response.usage is not None:
             _record_usage(
                 state,
@@ -152,21 +164,21 @@ def patch_anthropic() -> None:
         _check_limits(state)
         return response
 
-    async def _async_create(self, *args, **kwargs):
+    async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_current_state()
         if state is None:
-            return await _orig_async_create(self, *args, **kwargs)
+            return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        if not _is_messages_endpoint(options):
+            return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
 
         _check_limits(state)
-
-        stream = kwargs.get("stream", False)
-        model = kwargs.get("model", "")
+        model = _get_model_from_options(options)
 
         if stream:
-            result = await _orig_async_create(self, *args, **kwargs)
+            result = await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
             return _WrappedAsyncStream(result, model, state)
 
-        response = await _orig_async_create(self, *args, **kwargs)
+        response = await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
         if response.usage is not None:
             _record_usage(
                 state,
@@ -177,6 +189,6 @@ def patch_anthropic() -> None:
         _check_limits(state)
         return response
 
-    Messages.create = _create
-    AsyncMessages.create = _async_create
+    SyncAPIClient.request = _request
+    AsyncAPIClient.request = _async_request
     _patched = True
