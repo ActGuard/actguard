@@ -1,4 +1,6 @@
-# actguard Python SDK
+# ActGuard Python SDK 
+
+> Drop-in action firewall for LLM agents.
 
 ## Installation
 
