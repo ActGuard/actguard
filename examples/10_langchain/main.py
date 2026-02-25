@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for candidate in (str(REPO_ROOT / "libs" / "sdk-py"), str(REPO_ROOT / "examples" / "00_shared")):
@@ -35,12 +36,198 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# Node functions — same guard-exercising logic as the Google ADK example.
+# Each mutates the shared state dict in place and returns a status string.
+# ---------------------------------------------------------------------------
+
+def summarize_node(state: dict, no_llm: bool) -> str:
+    state["summary"] = summarize_ticket(
+        state["user_id"], state["ticket_text"], no_llm=no_llm
+    )
+    state["service"] = str(state["summary"].get("service") or "payments")
+    state["urgent"] = bool(state["summary"].get("urgent", False))
+    state["severity"] = str(state["summary"].get("severity") or "high")
+    return f"summarized: service={state['service']} urgent={state['urgent']}"
+
+
+def status_node(state: dict) -> str:
+    state["status"] = "unknown"
+    if state["mode"] is Mode.DEPENDENCY_DOWN:
+        for _ in range(3):
+            try:
+                lookup_status(
+                    state["user_id"], state["service"], mode=state["mode"].value
+                )
+            except CircuitOpenError as exc:
+                state["guards"].append(f"{exc.__class__.__name__}: {exc}")
+                state["status"] = "down"
+                break
+            except Exception as exc:  # noqa: BLE001
+                state["guards"].append(f"{exc.__class__.__name__}: {exc}")
+        if state["status"] == "unknown":
+            state["status"] = "down"
+        return f"status={state['status']}"
+
+    try:
+        state["status"] = lookup_status(
+            state["user_id"], state["service"], mode=state["mode"].value
+        )
+    except Exception as exc:  # noqa: BLE001
+        state["guards"].append(f"{exc.__class__.__name__}: {exc}")
+    return f"status={state['status']}"
+
+
+def decision_node(state: dict) -> str:
+    state["should_create_incident"] = bool(
+        state["urgent"] and state["status"] in {"degraded", "down"}
+    )
+    return f"should_create_incident={state['should_create_incident']}"
+
+
+def incident_node(state: dict) -> str:
+    if not state["should_create_incident"]:
+        return "incident=skipped"
+
+    key = f"inc-{state['ticket_id']}"
+    state["incident_id"] = create_incident(
+        state["user_id"],
+        f"{state['ticket_id']}: {state['ticket_text'][:80]}",
+        state["severity"],
+        idempotency_key=key,
+    )
+    if should_duplicate_incident(state["mode"]):
+        create_incident(
+            state["user_id"],
+            f"{state['ticket_id']}: {state['ticket_text'][:80]}",
+            state["severity"],
+            idempotency_key=key,
+        )
+    return f"incident_id={state['incident_id']}"
+
+
+def notify_node(state: dict, notify_fn: Any) -> str:
+    if not state["urgent"]:
+        return "notify=skipped"
+
+    for _ in range(notify_attempts(state["mode"])):
+        try:
+            notify_fn(
+                state["user_id"],
+                "pagerduty",
+                f"Urgent {state['ticket_id']} status={state['status']}",
+            )
+            state["notified"] = True
+        except (RateLimitExceeded, MaxAttemptsExceeded, ActGuardError) as exc:
+            state["guards"].append(f"{exc.__class__.__name__}: {exc}")
+    return f"notified={state['notified']}"
+
+
+# ---------------------------------------------------------------------------
+# LangChain agent builder
+# ---------------------------------------------------------------------------
+
+def build_agent(
+    args: argparse.Namespace,
+    mode: Mode,
+    ticket_id: str,
+    ticket_text: str,
+    notify_fn: Any,
+) -> tuple[Any, dict]:
+    import os
+
+    from langchain.agents import create_agent
+    from langchain_openai import ChatOpenAI
+
+    model = ChatOpenAI(model=os.getenv("ACTGUARD_DEMO_MODEL", "gpt-4o-mini"))
+
+    state: dict = {
+        "user_id": args.user_id,
+        "ticket_id": ticket_id,
+        "ticket_text": ticket_text,
+        "mode": mode,
+        "summary": {},
+        "service": "unknown",
+        "urgent": False,
+        "severity": "low",
+        "status": "unknown",
+        "should_create_incident": False,
+        "incident_id": None,
+        "notified": False,
+        "guards": [],
+    }
+
+    def summarize_tool() -> str:
+        return summarize_node(state, no_llm=args.no_llm)
+
+    def status_tool() -> str:
+        return status_node(state)
+
+    def decision_tool() -> str:
+        return decision_node(state)
+
+    def incident_tool() -> str:
+        return incident_node(state)
+
+    def notify_tool() -> str:
+        return notify_node(state, notify_fn)
+
+    agent = create_agent(
+        model,
+        tools=[summarize_tool, status_tool, decision_tool, incident_tool, notify_tool],
+        system_prompt=(
+            "You are a support-triage assistant. "
+            "Call each tool exactly once, in this order: "
+            "summarize_tool, status_tool, decision_tool, incident_tool, notify_tool. "
+            "Do not skip any tool."
+        ),
+    )
+    return agent, state
+
+
+# ---------------------------------------------------------------------------
+# No-LLM fallback: run all five nodes directly without the agent
+# ---------------------------------------------------------------------------
+
+def _run_nodes_directly(
+    args: argparse.Namespace,
+    mode: Mode,
+    ticket_id: str,
+    ticket_text: str,
+    notify_fn: Any,
+) -> dict:
+    state: dict = {
+        "user_id": args.user_id,
+        "ticket_id": ticket_id,
+        "ticket_text": ticket_text,
+        "mode": mode,
+        "summary": {},
+        "service": "unknown",
+        "urgent": False,
+        "severity": "low",
+        "status": "unknown",
+        "should_create_incident": False,
+        "incident_id": None,
+        "notified": False,
+        "guards": [],
+    }
+    summarize_node(state, no_llm=True)
+    status_node(state)
+    decision_node(state)
+    incident_node(state)
+    notify_node(state, notify_fn)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     load_env_if_present()
     args = parse_args()
     mode = parse_mode(args.mode)
     ticket_id, ticket_text = get_ticket_text(args.ticket_id, args.ticket_text)
-    guards: list[str] = []
 
     @max_attempts(calls=2)
     def notify_with_max_attempts(user_id: str, channel: str, message: str) -> None:
@@ -53,92 +240,37 @@ def main() -> int:
             usd_limit=args.usd_limit,
         ) as budget:
             if args.no_llm:
-                summary = summarize_ticket(args.user_id, ticket_text, no_llm=True)
-            else:
-                try:
-                    from langchain_core.runnables import RunnableLambda
-
-                    summary = RunnableLambda(
-                        lambda payload: summarize_ticket(
-                            payload["user_id"],
-                            payload["ticket_text"],
-                            no_llm=False,
-                        )
-                    ).invoke({"user_id": args.user_id, "ticket_text": ticket_text})
-                except Exception:
-                    summary = summarize_ticket(args.user_id, ticket_text, no_llm=True)
-
-            service = str(summary.get("service") or "payments")
-            urgent = bool(summary.get("urgent", False))
-            severity = str(summary.get("severity") or "high")
-            status = "unknown"
-            incident_id = None
-            notified = False
-
-            if mode is Mode.DEPENDENCY_DOWN:
-                for _ in range(3):
-                    try:
-                        lookup_status(args.user_id, service, mode=mode.value)
-                    except CircuitOpenError as exc:
-                        guards.append(f"{exc.__class__.__name__}: {exc}")
-                        status = "down"
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        guards.append(f"{exc.__class__.__name__}: {exc}")
-                if status == "unknown":
-                    status = "down"
-            else:
-                try:
-                    status = lookup_status(args.user_id, service, mode=mode.value)
-                except Exception as exc:  # noqa: BLE001
-                    guards.append(f"{exc.__class__.__name__}: {exc}")
-
-            if urgent and status in {"degraded", "down"}:
-                key = f"inc-{ticket_id}"
-                incident_id = create_incident(
-                    args.user_id,
-                    f"{ticket_id}: {ticket_text[:80]}",
-                    severity,
-                    idempotency_key=key,
+                state = _run_nodes_directly(
+                    args, mode, ticket_id, ticket_text, notify_with_max_attempts
                 )
-                if should_duplicate_incident(mode):
-                    create_incident(
-                        args.user_id,
-                        f"{ticket_id}: {ticket_text[:80]}",
-                        severity,
-                        idempotency_key=key,
-                    )
-
-            if urgent:
-                for _ in range(notify_attempts(mode)):
-                    try:
-                        notify_with_max_attempts(
-                            args.user_id,
-                            "pagerduty",
-                            f"Urgent {ticket_id} status={status}",
-                        )
-                        notified = True
-                    except (RateLimitExceeded, MaxAttemptsExceeded, ActGuardError) as exc:
-                        guards.append(f"{exc.__class__.__name__}: {exc}")
-
-            result = {
-                "ticket_id": ticket_id,
-                "urgent": urgent,
-                "service": service,
-                "status": status,
-                "incident_id": incident_id,
-                "notified": notified,
-            }
-
-            print(f"Framework: langchain | run_id={run.run_id}")
-            print(f"Result: {result}")
-            print("Guards:")
-            if guards:
-                for item in guards:
-                    print(f"- {item}")
             else:
-                print("- none")
-            print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
+                from langchain_core.messages import HumanMessage
+
+                agent, state = build_agent(
+                    args, mode, ticket_id, ticket_text, notify_with_max_attempts
+                )
+                agent.invoke(
+                    {"messages": [HumanMessage(content=f"Support ticket:\n{ticket_text}")]}
+                )
+
+        result = {
+            "ticket_id": state["ticket_id"],
+            "urgent": state["urgent"],
+            "service": state["service"],
+            "status": state["status"],
+            "incident_id": state["incident_id"],
+            "notified": state["notified"],
+        }
+
+        print(f"Framework: langchain | run_id={run.run_id}")
+        print(f"Result: {result}")
+        print("Guards:")
+        if state["guards"]:
+            for item in state["guards"]:
+                print(f"- {item}")
+        else:
+            print("- none")
+        print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
 
     return 0
 
