@@ -27,6 +27,8 @@ This example shows the support-triage flow using `create_agent` — a single age
 
 ```bash
 cd examples/10_langchain
+python -m venv .venv
+source .venv/bin/activate
 pip install -e ../../libs/sdk-py
 pip install -r requirements.txt
 ```
@@ -34,7 +36,6 @@ pip install -r requirements.txt
 ## Run without LLM
 
 ```bash
-cd examples/10_langchain
 python main.py --mode happy --no_llm
 python main.py --mode slow_dependency --no_llm
 python main.py --mode dependency_down --no_llm
