@@ -158,18 +158,23 @@ def build_agent(
     }
 
     def summarize_tool() -> str:
+        """Summarize the support ticket and extract service, urgency, severity."""
         return summarize_node(state, no_llm=args.no_llm)
 
     def status_tool() -> str:
+        """Check the current status of the affected service."""
         return status_node(state)
 
     def decision_tool() -> str:
+        """Decide whether an incident should be created."""
         return decision_node(state)
 
     def incident_tool() -> str:
+        """Create an incident if the ticket is urgent and the service is impacted."""
         return incident_node(state)
 
     def notify_tool() -> str:
+        """Notify the on-call team about the urgent ticket."""
         return notify_node(state, notify_fn)
 
     agent = create_agent(
