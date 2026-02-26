@@ -9,6 +9,8 @@ Tool Guards are decorators for protecting tool functions (the functions your age
 - `@actguard.max_attempts` for per-run attempt caps.
 - `@actguard.timeout` for wall-clock execution limits.
 - `@actguard.idempotent` for at-most-once behavior by idempotency key.
+- `@actguard.prove` for minting verified facts from read-tool results.
+- `@actguard.enforce` for checking chain-of-custody rules before writes.
 - `@actguard.tool(...)` as a unified decorator that composes guards.
 
 Enforcement is local and in-process by default. If configured, ActGuard can also report checks to the gateway for global enforcement visibility.
@@ -230,6 +232,159 @@ with RunContext():
 
 ---
 
+## Chain-of-custody guards
+
+### actguard.session()
+
+`prove` and `enforce` require an active chain-of-custody session:
+
+```python
+import actguard
+
+with actguard.session("req-42", {"user_id": "u1"}):
+    ...
+```
+
+`session()` also supports async:
+
+```python
+import actguard
+
+async with actguard.session("req-42", {"user_id": "u1"}):
+    ...
+```
+
+Without an active session, `prove` and `enforce` raise `GuardError(code="NO_SESSION")`.
+
+### @actguard.prove
+
+```python
+actguard.prove(
+    kind: str,
+    extract: str | Callable,
+    ttl: float = 300,
+    max_items: int = 200,
+    on_too_many: str = "block",
+)
+```
+
+Decorator that mints verified facts from a tool's return value.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `kind` | `str` | required | Fact kind/category (for example `order_id`) |
+| `extract` | `str \| Callable` | required | Field/attribute name, or callable that extracts value(s) from result |
+| `ttl` | `float` | `300` | Fact lifetime in seconds |
+| `max_items` | `int` | `200` | Maximum minted values per tool invocation |
+| `on_too_many` | `"block" \| "truncate"` | `"block"` | Block with `GuardError` or mint first `max_items` only |
+
+Notes:
+
+- Supports sync and async tool functions.
+- Requires an active `actguard.session(...)`.
+- Minted values are normalized to strings.
+- `on_too_many="block"` raises `GuardError(code="TOO_MANY_RESULTS")`.
+
+Example:
+
+```python
+import actguard
+
+@actguard.prove(kind="order_id", extract="id")
+def list_orders(user_id: str) -> list[dict]:
+    ...
+
+with actguard.session("req-1", {"user_id": "u1"}):
+    list_orders("u1")
+```
+
+---
+
+### @actguard.enforce
+
+```python
+actguard.enforce(rules: list[Rule])
+```
+
+Decorator that checks chain-of-custody rules before a tool executes.
+
+Rules are evaluated in order. The first failing rule raises `GuardError`.
+
+Notes:
+
+- Supports sync and async tool functions.
+- Requires an active `actguard.session(...)`.
+- Uses function argument binding (including defaults) before rule evaluation.
+
+Example:
+
+```python
+import actguard
+
+@actguard.enforce([actguard.RequireFact("order_id", "order_id")])
+def delete_order(order_id: str) -> str:
+    ...
+```
+
+---
+
+### Rule classes
+
+#### RequireFact
+
+```python
+actguard.RequireFact(arg: str, kind: str, hint: str = "")
+```
+
+Requires argument value(s) to be previously proven in the active session.
+
+#### Threshold
+
+```python
+actguard.Threshold(arg: str, max: float)
+```
+
+Blocks if numeric argument exceeds the configured maximum.
+
+#### BlockRegex
+
+```python
+actguard.BlockRegex(arg: str, pattern: str)
+```
+
+Blocks if argument string matches the configured regex pattern.
+
+---
+
+### Prove-then-enforce pattern
+
+```python
+import actguard
+from actguard import GuardError
+
+@actguard.prove(kind="order_id", extract="id")
+def list_orders(user_id: str) -> list[dict]:
+    return [{"id": "o1"}]
+
+@actguard.enforce([actguard.RequireFact("order_id", "order_id")])
+def cancel_order(order_id: str) -> str:
+    return f"cancelled:{order_id}"
+
+with actguard.session("req-123", {"user_id": "alice"}):
+    list_orders("alice")
+    cancel_order("o1")
+```
+
+---
+
+### In-memory store semantics
+
+- Verified facts are stored in-memory, in-process, and are ephemeral.
+- Facts are scoped by session id and scope hash.
+- Data does not survive process restart and is not shared across processes.
+
+---
+
 ## @actguard.tool (unified decorator)
 
 ```python
@@ -272,6 +427,10 @@ with RunContext():
 ```
 
 > **Name collision note:** Many frameworks export their own `@tool`. Prefer `import actguard` and `@actguard.tool(...)`.
+>
+> `@actguard.tool(...)` currently composes `rate_limit`, `circuit_breaker`,
+> `max_attempts`, `timeout`, and `idempotent`. Use `@actguard.prove` and
+> `@actguard.enforce` as separate decorators.
 
 ---
 
@@ -284,6 +443,22 @@ class actguard.ToolGuardError(Exception)
 ```
 
 Base exception for guard-blocked execution.
+
+### GuardError
+
+```python
+class actguard.GuardError(ToolGuardError)
+```
+
+Raised by `@prove` / `@enforce` when chain-of-custody checks fail.
+
+Common `code` values:
+
+- `NO_SESSION`
+- `MISSING_FACT`
+- `TOO_MANY_RESULTS`
+- `THRESHOLD_EXCEEDED`
+- `PATTERN_BLOCKED`
 
 ### ToolExecutionError
 

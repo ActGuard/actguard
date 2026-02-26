@@ -37,7 +37,7 @@ No configuration file, no proxy, no side-car process. Budget state lives in a Py
 - **Async support**: `BudgetGuard` is both a sync and async context manager.
 - **Multi-provider**: OpenAI, Anthropic, Google Generative AI out of the box.
 - **Context-var isolation**: nested or concurrent guards do not interfere.
-- **Tool guards**: `rate_limit`, `circuit_breaker`, `max_attempts`, `timeout`, and `idempotent` decorators for tool functions.
+- **Tool guards**: `rate_limit`, `circuit_breaker`, `max_attempts`, `timeout`, `idempotent`, plus `prove`/`enforce` chain-of-custody decorators.
 - **Gateway-ready**: optionally report tool checks to the ActGuard platform.
 
 ## How it works
@@ -61,6 +61,6 @@ each patched call:
 
 - [Getting Started](./getting-started.md) - installation options and first examples
 - [Core Concepts](./concepts.md) - limits, context isolation, streaming, and tool runtime context
-- [Tool Guards](./tool-guards.md) - rate limiting, circuit breaker, max attempts, timeout, idempotency, and framework integrations
+- [Tool Guards](./tool-guards.md) - rate limiting, circuit breaker, max attempts, timeout, idempotency, chain-of-custody, and framework integrations
 - [Integrations](./integrations/openai.md) - provider-specific notes and requirements
 - [API Reference](./api-reference.md) - full API and exception reference

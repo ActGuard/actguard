@@ -124,6 +124,36 @@ class IdempotencyOutcomeUnknown(ToolGuardError):
         )
 
 
+class GuardError(ToolGuardError):
+    """Raised by @prove / @enforce when a chain-of-custody rule is violated."""
+
+    def __init__(
+        self, code: str, message: str, details: dict = None, fix_hint: str = None
+    ):
+        self.code = code
+        self.message = message
+        self.details = details or {}
+        self.fix_hint = fix_hint
+        super().__init__(message)
+
+    def to_prompt(self) -> str:
+        if self.code == "NO_SESSION":
+            return (
+                "BLOCKED: No active ActGuard session. "
+                "Wrap your agent loop with actguard.session()."
+            )
+        if self.code == "MISSING_FACT":
+            kind = self.details.get("kind", "resource")
+            value = self.details.get("value", "?")
+            hint = self.fix_hint or f"Call a read tool to fetch '{kind}' first."
+            return (
+                f"BLOCKED: You cannot use {kind}='{value}' because it was not verified "
+                f"in this session. Fix: {hint}"
+            )
+        # TOO_MANY_RESULTS, THRESHOLD_EXCEEDED, PATTERN_BLOCKED
+        return f"BLOCKED [{self.code}]: {self.message}. Fix: {self.fix_hint or ''}"
+
+
 class BudgetExceededError(Exception):
     """Raised when a BudgetGuard limit (token or USD) is exceeded."""
 
