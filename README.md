@@ -48,6 +48,7 @@ This protects you from silent cost drift when an agent keeps exploring, retrying
 
 ```python
 import actguard
+from actguard.exceptions import GuardError
 
 @actguard.prove(kind="order_id", extract="id")
 def list_orders(user_id: str) -> list[dict]:
@@ -57,12 +58,17 @@ def list_orders(user_id: str) -> list[dict]:
 def cancel_order(order_id: str) -> str:
     return f"cancelled:{order_id}"
 
-with actguard.session("req-123", {"user_id": "alice"}):
-    list_orders("alice")
-    cancel_order("o1")
+try:
+    with actguard.session("req-123", {"user_id": "alice"}):
+        list_orders("alice")
+        cancel_order("o1")
+except GuardError as e:
+    hint_for_llm = e.to_prompt()
+    # Feed hint_for_llm back to the agent so it can fix its plan.
 ```
 
-This blocks write actions unless required facts were proven earlier in the same session and scope.
+This blocks actions that look valid by input but are invalid for the session journey.
+`e.to_prompt()` returns actionable context the LLM can use to self-correct.
 
 ## Secondary guards (complementary controls)
 
