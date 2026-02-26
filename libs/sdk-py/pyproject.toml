@@ -38,6 +38,16 @@ Repository = "https://github.com/actguard/actguard"
 [tool.hatch.build.targets.wheel]
 packages = ["actguard"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "AGENTS.md",
+    ".vscode/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    ".venv/",
+    "uv.lock",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
