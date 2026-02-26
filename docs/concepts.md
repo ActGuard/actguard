@@ -106,6 +106,36 @@ with RunContext(run_id="req-123"):
 
 ---
 
+## Chain-of-custody session
+
+`session` provides chain-of-custody state for `prove` and `enforce`.
+
+```python
+import actguard
+
+with actguard.session("req-123", {"user_id": "u1"}):
+    ...
+```
+
+### What state is stored
+
+- Verified facts minted by `@prove`
+- Session id and scope dimensions used to isolate fact visibility
+
+### Isolation semantics
+
+- **Per session**: facts minted in session A are not visible in session B.
+- **Per scope**: scope dimensions (for example user id) affect fact visibility.
+- **Async support**: `session` supports both `with` and `async with`.
+
+### Storage behavior
+
+- State is in-memory and process-local.
+- State is ephemeral and cleared on process restart.
+- This local store is suitable for single-process agents; gateway reporting is used for global visibility.
+
+---
+
 ## Patching
 
 `BudgetGuard.__enter__()` calls `patch_all()` once per process, which monkey-patches the transport layer of each installed LLM SDK. The patch is idempotent — calling it multiple times has no effect.

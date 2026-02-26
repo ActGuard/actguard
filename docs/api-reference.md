@@ -241,6 +241,107 @@ Requires the decorated function to include an `idempotency_key` parameter.
 
 ---
 
+### Chain-of-custody APIs
+
+#### session()
+
+```python
+actguard.session(id: str, scope: dict[str, str] | None = None) -> GuardSession
+```
+
+Context manager for chain-of-custody state used by `@prove` and `@enforce`.
+Supports sync and async usage.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `id` | `str` | required | Session identifier (request/run correlation id) |
+| `scope` | `dict[str, str] \| None` | `None` | Optional scope dimensions (for example `{"user_id": "u42"}`) |
+
+#### GuardSession
+
+Context manager returned by `session(...)`.
+
+| Method | Signature | Description |
+|---|---|---|
+| enter | `__enter__() -> GuardSession` | Activate session state |
+| exit | `__exit__(...) -> None` | Restore previous session state |
+| async enter | `__aenter__() -> GuardSession` | Async enter |
+| async exit | `__aexit__(...) -> None` | Async exit |
+
+#### @prove
+
+```python
+actguard.prove(
+    kind: str,
+    extract: str | Callable,
+    ttl: float = 300,
+    max_items: int = 200,
+    on_too_many: str = "block",
+)
+```
+
+Decorator that mints verified facts from a tool's return value.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `kind` | `str` | required | Fact kind/category |
+| `extract` | `str \| Callable` | required | Field/attribute name or callable extractor |
+| `ttl` | `float` | `300` | Fact TTL in seconds |
+| `max_items` | `int` | `200` | Maximum values to mint per invocation |
+| `on_too_many` | `"block" \| "truncate"` | `"block"` | Block with `GuardError` or truncate extracted values |
+
+Requires an active `actguard.session(...)`. Without it, raises `GuardError(code="NO_SESSION")`.
+
+---
+
+#### @enforce
+
+```python
+actguard.enforce(rules: list[Rule])
+```
+
+Decorator that checks chain-of-custody rules before tool execution.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rules` | `list[Rule]` | required | Rule objects evaluated in order |
+
+Requires an active `actguard.session(...)`. Without it, raises `GuardError(code="NO_SESSION")`.
+
+---
+
+#### RequireFact
+
+```python
+actguard.RequireFact(arg: str, kind: str, hint: str = "")
+```
+
+Rule requiring argument value(s) to have been proven in active session scope.
+
+#### Threshold
+
+```python
+actguard.Threshold(arg: str, max: float)
+```
+
+Rule enforcing a maximum numeric value for an argument.
+
+#### BlockRegex
+
+```python
+actguard.BlockRegex(arg: str, pattern: str)
+```
+
+Rule blocking argument values that match a regex pattern.
+
+In-memory store semantics:
+
+- Fact verification state is in-memory, process-local, and ephemeral.
+- Facts are isolated by session id and scope hash.
+- State is not durable across restarts and is not shared across processes.
+
+---
+
 ### @tool
 
 ```python
@@ -283,6 +384,24 @@ class actguard.ToolGuardError(Exception)
 ```
 
 Base class for guard-blocked tool execution.
+
+### GuardError
+
+```python
+class actguard.GuardError(ToolGuardError)
+```
+
+Raised by `@prove` and `@enforce`.
+
+| Attribute | Type |
+|---|---|
+| `code` | `str` |
+| `message` | `str` |
+| `details` | `dict` |
+| `fix_hint` | `str \| None` |
+
+Common `code` values: `NO_SESSION`, `MISSING_FACT`, `TOO_MANY_RESULTS`,
+`THRESHOLD_EXCEEDED`, `PATTERN_BLOCKED`.
 
 ### ToolExecutionError
 

@@ -205,6 +205,47 @@ with RunContext():
     same_invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
 ```
 
+## Chain-of-custody: session + prove + enforce + in-memory store
+
+`prove` and `enforce` use a chain-of-custody session, so they require `actguard.session(...)`:
+
+```python
+import actguard
+
+with actguard.session("req-123", {"user_id": "alice"}):
+    ...
+```
+
+Use `RunContext` for `max_attempts`/`idempotent`, and `session` for `prove`/`enforce`.
+
+## Prove then enforce in one flow
+
+Use `prove` on read tools to mint verified facts, then `enforce` on write tools:
+
+```python
+import actguard
+
+@actguard.prove(kind="order_id", extract="id")
+def list_orders(user_id: str) -> list[dict]:
+    return [{"id": "o1"}]
+
+@actguard.enforce([actguard.RequireFact("order_id", "order_id")])
+def delete_order(order_id: str) -> str:
+    return f"deleted:{order_id}"
+
+with actguard.session("req-9", {"user_id": "alice"}):
+    list_orders("alice")
+    delete_order("o1")
+```
+
+If a write references an unproven id, `enforce` raises `GuardError` with code `MISSING_FACT`.
+
+## In-memory store behavior (local by default)
+
+- Runtime facts and guard state are stored in-memory in the current process.
+- State is ephemeral (not durable across process restarts).
+- For cross-process/global enforcement visibility, configure the ActGuard gateway.
+
 ## Combine guards with @actguard.tool
 
 Use the unified decorator when you want one declaration:
@@ -234,6 +275,7 @@ with RunContext():
 - Use `max_attempts` to cap retries/loops per run.
 - Use `timeout` to bound wall-clock latency.
 - Use `idempotent` to deduplicate side-effectful tools.
+- Use `prove` + `enforce` to require read-before-write chain-of-custody.
 
 ## What's next
 
