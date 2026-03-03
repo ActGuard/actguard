@@ -128,6 +128,15 @@ class _WrappedAsyncStream:
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
 
+    async def __aenter__(self):
+        if hasattr(type(self._inner), '__aenter__'):
+            await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        if hasattr(type(self._inner), '__aexit__'):
+            return await self._inner.__aexit__(*args)
+
 
 def patch_openai() -> None:
     global _patched
