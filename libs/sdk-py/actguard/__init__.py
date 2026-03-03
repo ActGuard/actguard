@@ -4,6 +4,7 @@ from ._config import configure
 from .budget import BudgetGuard
 from .exceptions import (
     ActGuardError,
+    ActGuardViolation,
     BudgetExceededError,
     CircuitOpenError,
     DuplicateIdempotencyKey,
@@ -19,6 +20,7 @@ from .exceptions import (
     ToolGuardError,
     ToolTimeoutError,
 )
+from .reporting import emit_event, emit_violation
 from .run_context import RunContext, session
 from .tools import (
     FAIL_ON_DEFAULT,
@@ -44,6 +46,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ActGuardError",
+    "ActGuardViolation",
     "BlockRegex",
     "BudgetGuard",
     "BudgetExceededError",
@@ -51,6 +54,8 @@ __all__ = [
     "configure",
     "circuit_breaker",
     "DuplicateIdempotencyKey",
+    "emit_event",
+    "emit_violation",
     "enforce",
     "FAIL_ON_DEFAULT",
     "FAIL_ON_INFRA_ONLY",

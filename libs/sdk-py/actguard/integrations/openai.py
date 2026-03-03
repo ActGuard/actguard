@@ -19,10 +19,14 @@ def _parse_major_minor(version: str):
 def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> None:
     state.tokens_used += input_tokens + output_tokens
     state.usd_used += get_cost("openai", model, input_tokens, output_tokens)
+    from actguard.reporting import _emit_budget_consumed
+    _emit_budget_consumed(state, model, input_tokens, output_tokens)
 
 
 def _check_limits(state) -> None:
     if state.token_limit is not None and state.tokens_used >= state.token_limit:
+        from actguard.reporting import _emit_budget_blocked
+        _emit_budget_blocked(state)
         raise BudgetExceededError(
             user_id=state.user_id,
             tokens_used=state.tokens_used,
@@ -32,6 +36,8 @@ def _check_limits(state) -> None:
             limit_type="token",
         )
     if state.usd_limit is not None and state.usd_used >= state.usd_limit:
+        from actguard.reporting import _emit_budget_blocked
+        _emit_budget_blocked(state)
         raise BudgetExceededError(
             user_id=state.user_id,
             tokens_used=state.tokens_used,
@@ -151,6 +157,8 @@ def patch_openai() -> None:
         if state is None:
             return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
 
+        from actguard.reporting import _emit_budget_check
+        _emit_budget_check(state)
         _check_limits(state)
         model = _get_model_from_options(options)
         if stream:
@@ -173,6 +181,8 @@ def patch_openai() -> None:
         if state is None:
             return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
 
+        from actguard.reporting import _emit_budget_check
+        _emit_budget_check(state)
         _check_limits(state)
         model = _get_model_from_options(options)
         if stream:

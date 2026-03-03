@@ -1,3 +1,7 @@
+import functools
+import inspect
+
+
 def tool(
     fn=None,
     *,
@@ -55,4 +59,81 @@ def tool(
 
     # policy: stub reserved for future phases
 
-    return wrapped
+    tool_qname = fn.__qualname__
+
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async_wrap(*args, **kwargs):
+            _emit_tool_invoked(tool_qname)
+            try:
+                result = await wrapped(*args, **kwargs)
+                _emit_tool_succeeded(tool_qname)
+                return result
+            except Exception as exc:
+                _emit_tool_error(tool_qname, exc)
+                raise
+
+        return _async_wrap
+
+    @functools.wraps(fn)
+    def _sync_wrap(*args, **kwargs):
+        _emit_tool_invoked(tool_qname)
+        try:
+            result = wrapped(*args, **kwargs)
+            _emit_tool_succeeded(tool_qname)
+            return result
+        except Exception as exc:
+            _emit_tool_error(tool_qname, exc)
+            raise
+
+    return _sync_wrap
+
+
+def _emit_tool_invoked(tool_name: str) -> None:
+    try:
+        from actguard.reporting import emit_event
+        emit_event("tool", "invoked", {"tool_name": tool_name})
+    except Exception:
+        pass
+
+
+def _emit_tool_succeeded(tool_name: str) -> None:
+    try:
+        from actguard.reporting import emit_event
+        emit_event("tool", "succeeded", {"tool_name": tool_name}, outcome="success")
+    except Exception:
+        pass
+
+
+def _emit_tool_error(tool_name: str, exc: Exception) -> None:
+    try:
+        from actguard.exceptions import ActGuardViolation, ToolGuardError
+        from actguard.reporting import emit_event
+
+        if isinstance(exc, ToolGuardError):
+            emit_event(
+                "tool",
+                "blocked",
+                {
+                    "tool_name": tool_name,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                severity="error",
+                outcome="blocked",
+            )
+        elif not isinstance(exc, ActGuardViolation):
+            emit_event(
+                "tool",
+                "failed",
+                {
+                    "tool_name": tool_name,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                severity="error",
+                outcome="failed",
+            )
+        # ActGuardViolation (non-guard) has its own reporting path via emit_violation
+    except Exception:
+        pass

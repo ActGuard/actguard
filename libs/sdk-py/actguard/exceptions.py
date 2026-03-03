@@ -1,4 +1,20 @@
+from __future__ import annotations
+
 from typing import Literal, Optional
+
+
+class ActGuardViolation(Exception):
+    """Base for all policy violations that can be reported via emit_violation()."""
+
+    code: str = ""
+    severity: str = "error"
+    outcome: str = "blocked"
+
+    def payload(self) -> dict:
+        return {}
+
+    def evidence(self) -> list:
+        return []
 
 
 class ActGuardError(Exception):
@@ -53,18 +69,29 @@ class MissingRuntimeContextError(ToolGuardError):
         super().__init__(message or default)
 
 
-class MaxAttemptsExceeded(ToolGuardError):
+class MaxAttemptsExceeded(ToolGuardError, ActGuardViolation):
     """Raised when a tool exceeds its max_attempts cap within a RunContext."""
+
+    code = "guard.max_attempts_exceeded"
 
     def __init__(self, *, run_id: str, tool_name: str, limit: int, used: int) -> None:
         self.run_id = run_id
         self.tool_name = tool_name
         self.limit = limit
         self.used = used
-        super().__init__(
+        Exception.__init__(
+            self,
             f"MAX_ATTEMPTS_EXCEEDED tool={tool_name!r} used={used}/{limit}"
-            f" run={run_id!r}"
+            f" run={run_id!r}",
         )
+
+    def payload(self) -> dict:
+        return {
+            "run_id": self.run_id,
+            "tool_name": self.tool_name,
+            "limit": self.limit,
+            "used": self.used,
+        }
 
 
 class ToolTimeoutError(ToolExecutionError):
@@ -154,8 +181,10 @@ class GuardError(ToolGuardError):
         return f"BLOCKED [{self.code}]: {self.message}. Fix: {self.fix_hint or ''}"
 
 
-class BudgetExceededError(Exception):
+class BudgetExceededError(ActGuardViolation):
     """Raised when a BudgetGuard limit (token or USD) is exceeded."""
+
+    code = "budget.limit_exceeded"
 
     def __init__(
         self,
@@ -184,4 +213,14 @@ class BudgetExceededError(Exception):
                 f"USD limit exceeded for user '{user_id}': "
                 f"${usd_used:.6f} / ${usd_limit:.6f} used"
             )
-        super().__init__(msg)
+        Exception.__init__(self, msg)
+
+    def payload(self) -> dict:
+        return {
+            "user_id": self.user_id,
+            "tokens_used": self.tokens_used,
+            "usd_used": self.usd_used,
+            "token_limit": self.token_limit,
+            "usd_limit": self.usd_limit,
+            "limit_type": self.limit_type,
+        }

@@ -7,17 +7,61 @@ from actguard.tools._scope import reset_session, set_session
 
 
 class RunContext:
-    def __init__(self, *, run_id: Optional[str] = None) -> None:
+    def __init__(
+        self, *, run_id: Optional[str] = None, user_id: Optional[str] = None
+    ) -> None:
         self.run_id: str = run_id if run_id is not None else str(uuid.uuid4())
+        self.user_id: str = user_id or ""
         self._state: Optional[RunState] = None
         self._token: Optional[Token] = None
 
     def __enter__(self) -> "RunContext":
-        self._state = RunState(run_id=self.run_id)
+        self._state = RunState(run_id=self.run_id, user_id=self.user_id)
         self._token = set_run_state(self._state)
+        try:
+            from actguard.reporting import emit_event
+
+            emit_event(
+                "run",
+                "started",
+                {"run_id": self.run_id, "user_id": self.user_id},
+            )
+        except Exception:
+            pass
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            from actguard.reporting import emit_event
+
+            if exc_type is None:
+                emit_event(
+                    "run",
+                    "completed",
+                    {"run_id": self.run_id},
+                    outcome="completed",
+                )
+            else:
+                from actguard.exceptions import ActGuardViolation
+
+                if issubclass(exc_type, ActGuardViolation):
+                    emit_event(
+                        "run",
+                        "blocked",
+                        {"run_id": self.run_id, "error_type": exc_type.__name__},
+                        severity="error",
+                        outcome="blocked",
+                    )
+                else:
+                    emit_event(
+                        "run",
+                        "failed",
+                        {"run_id": self.run_id, "error_type": exc_type.__name__},
+                        severity="error",
+                        outcome="failed",
+                    )
+        except Exception:
+            pass
         if self._token is not None:
             reset_run_state(self._token)
             self._token = None

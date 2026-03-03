@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 @dataclass
 class RunState:
     run_id: str
+    user_id: str = ""
     _tool_attempts: Dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
     _idem_store: Dict[Tuple[str, str], Any] = field(default_factory=dict)
