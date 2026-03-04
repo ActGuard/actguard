@@ -45,6 +45,34 @@ def test_budget_exceeded_emits_violation_event(event_client):
     assert envelope.payload["limit_type"] == "token"
 
 
+def test_budget_guard_events_include_run_id(event_client):
+    with BudgetGuard(user_id="alice") as guard:
+        actguard.emit_event("budget", "check", {})
+
+    assert event_client._queue.qsize() == 1
+    envelope = event_client._queue.get_nowait()
+    assert envelope.run_id
+    assert envelope.run_id.startswith("run_")
+    assert guard.run_id == envelope.run_id
+
+
+def test_nested_budget_guards_share_run_id(event_client):
+    with BudgetGuard(user_id="outer") as outer:
+        with BudgetGuard(user_id="inner") as inner:
+            pass
+    assert outer.run_id is not None
+    assert inner.run_id == outer.run_id
+
+
+def test_synthetic_run_id_without_guard(event_client):
+    actguard.emit_event("budget", "check", {})
+
+    assert event_client._queue.qsize() == 1
+    envelope = event_client._queue.get_nowait()
+    assert envelope.run_id.startswith("syn_")
+    assert envelope.meta.get("run_is_synthetic") == "true"
+
+
 def test_emit_violation_no_op_without_config():
     # No event_client fixture → no configure() called
     error = BudgetExceededError(

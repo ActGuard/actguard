@@ -158,6 +158,33 @@ class TestBudgetGuard:
                 raise ValueError("boom")
         assert get_current_state() is None
 
+    def test_run_id_generated_on_enter(self):
+        with BudgetGuard(user_id="alice") as g:
+            assert g.run_id is not None
+            assert g.run_id.startswith("run_")
+
+    def test_run_state_set_and_cleared(self):
+        from actguard.core.run_context import get_run_state
+
+        assert get_run_state() is None
+        with BudgetGuard(user_id="alice") as g:
+            state = get_run_state()
+            assert state is not None
+            assert state.run_id == g.run_id
+        assert get_run_state() is None
+
+    def test_nesting_reuses_outer_run_id(self):
+        from actguard.core.run_context import get_run_state
+
+        with BudgetGuard(user_id="outer") as outer:
+            outer_run_id = outer.run_id
+            with BudgetGuard(user_id="inner") as inner:
+                assert inner.run_id == outer_run_id
+            # outer RunState still active after inner exits
+            assert get_run_state() is not None
+            assert get_run_state().run_id == outer_run_id
+        assert get_run_state() is None
+
 
 # ---------------------------------------------------------------------------
 # Async context manager
