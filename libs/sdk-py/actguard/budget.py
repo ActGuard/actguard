@@ -27,6 +27,35 @@ class BudgetGuard:
         self.usd_limit = usd_limit
         self._state: Optional[BudgetState] = None
         self._token: Optional[Token] = None
+        self.run_id: Optional[str] = None
+        self._run_state_token: Optional[Token] = None
+        self._owns_run_state: bool = False
+
+    # ------------------------------------------------------------------
+    # RunState lifecycle helpers
+    # ------------------------------------------------------------------
+
+    def _enter_run_state(self) -> None:
+        from actguard.core.run_context import RunState, get_run_state, set_run_state
+
+        existing = get_run_state()
+        if existing and existing.run_id:
+            self.run_id = existing.run_id
+            self._owns_run_state = False
+        else:
+            import uuid
+            self.run_id = "run_" + uuid.uuid4().hex
+            self._run_state_token = set_run_state(
+                RunState(run_id=self.run_id, user_id=self.user_id or "")
+            )
+            self._owns_run_state = True
+
+    def _exit_run_state(self) -> None:
+        if self._owns_run_state and self._run_state_token is not None:
+            from actguard.core.run_context import reset_run_state
+            reset_run_state(self._run_state_token)
+            self._run_state_token = None
+            self._owns_run_state = False
 
     # ------------------------------------------------------------------
     # Sync context manager
@@ -40,9 +69,11 @@ class BudgetGuard:
             usd_limit=self.usd_limit,
         )
         self._token = set_state(self._state)
+        self._enter_run_state()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self._exit_run_state()
         if self._token is not None:
             reset_state(self._token)
             self._token = None

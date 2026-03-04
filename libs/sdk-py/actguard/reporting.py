@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import List, Optional
+
+_synthetic_run_id: ContextVar[str] = ContextVar("_synthetic_run_id", default="")
 
 
 def emit_event(
@@ -39,10 +42,11 @@ def emit_event(
     if mode == "verbose" and event_key not in VERBOSE:
         return
 
-    run_id, user_id = _context_ids(run_id, user_id)
+    run_id, user_id, is_synthetic = _context_ids(run_id, user_id)
 
     from actguard.events.envelope import Envelope
 
+    meta: dict = {"run_is_synthetic": "true"} if is_synthetic else {}
     envelope = Envelope(
         agent_id=config.agent_id,
         user_id=user_id,
@@ -55,6 +59,7 @@ def emit_event(
         outcome=outcome,
         payload=payload,
         evidence=evidence or [],
+        meta=meta,
     )
     client.enqueue(envelope)
 
@@ -157,9 +162,13 @@ def _emit_budget_blocked(state) -> None:
 
 
 def _context_ids(run_id: str, user_id: str) -> tuple:
-    """Fill run_id and user_id from active RunState if not already provided."""
+    """Fill run_id and user_id from active RunState if not already provided.
+
+    Returns (run_id, user_id, is_synthetic) where is_synthetic=True means
+    the run_id was generated as a fallback with no active guard/context.
+    """
     if run_id and user_id:
-        return run_id, user_id
+        return run_id, user_id, False
     try:
         from actguard.core.run_context import get_run_state
 
@@ -171,4 +180,14 @@ def _context_ids(run_id: str, user_id: str) -> tuple:
                 user_id = getattr(state, "user_id", "")
     except Exception:
         pass
-    return run_id, user_id
+
+    if not run_id:
+        sid = _synthetic_run_id.get()
+        if not sid:
+            import uuid
+            sid = "syn_" + uuid.uuid4().hex
+            _synthetic_run_id.set(sid)
+        run_id = sid
+        return run_id, user_id, True
+
+    return run_id, user_id, False
