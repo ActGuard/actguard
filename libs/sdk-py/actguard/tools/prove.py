@@ -4,6 +4,7 @@ from typing import Callable, Union
 
 from actguard.exceptions import GuardError
 from actguard.tools._facts import mint
+from actguard.tools._observability import emit_guard_blocked
 from actguard.tools._scope import get_scope_hash, get_session_id
 
 
@@ -26,6 +27,8 @@ def prove(
     """
 
     def decorator(fn):
+        tool_name = fn.__qualname__
+
         def _extract_and_mint(result, session_id: str) -> None:
             # Normalize to list for extraction
             if result is None:
@@ -80,29 +83,37 @@ def prove(
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            session_id = get_session_id()
-            if session_id is None:
-                raise GuardError(
-                    "NO_SESSION",
-                    "No active ActGuard session.",
-                    fix_hint="Wrap your agent loop with actguard.session().",
-                )
-            result = fn(*args, **kwargs)
-            _extract_and_mint(result, session_id)
-            return result
+            try:
+                session_id = get_session_id()
+                if session_id is None:
+                    raise GuardError(
+                        "NO_SESSION",
+                        "No active ActGuard session.",
+                        fix_hint="Wrap your agent loop with actguard.session().",
+                    )
+                result = fn(*args, **kwargs)
+                _extract_and_mint(result, session_id)
+                return result
+            except GuardError as exc:
+                emit_guard_blocked(tool_name, "prove", exc)
+                raise
 
         @functools.wraps(fn)
         async def async_wrapper(*args, **kwargs):
-            session_id = get_session_id()
-            if session_id is None:
-                raise GuardError(
-                    "NO_SESSION",
-                    "No active ActGuard session.",
-                    fix_hint="Wrap your agent loop with actguard.session().",
-                )
-            result = await fn(*args, **kwargs)
-            _extract_and_mint(result, session_id)
-            return result
+            try:
+                session_id = get_session_id()
+                if session_id is None:
+                    raise GuardError(
+                        "NO_SESSION",
+                        "No active ActGuard session.",
+                        fix_hint="Wrap your agent loop with actguard.session().",
+                    )
+                result = await fn(*args, **kwargs)
+                _extract_and_mint(result, session_id)
+                return result
+            except GuardError as exc:
+                emit_guard_blocked(tool_name, "prove", exc)
+                raise
 
         return async_wrapper if inspect.iscoroutinefunction(fn) else wrapper
 

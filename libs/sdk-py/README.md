@@ -21,19 +21,20 @@ uv add actguard
 | Skipped workflow steps | Performs side effect before required step | ✅ |
 | Obeying malicious input | Untrusted text tells it to do something destructive | ✅ |
 
-## Set a spending or token limit (BudgetGuard)
+## Set a spending or token limit (`client.budget_guard`)
 
 Stop spending as soon as a user's request crosses $0.05:
 
 ```python
-from actguard import BudgetGuard, BudgetExceededError
+from actguard import Client, BudgetExceededError
 import openai
 
-client = openai.OpenAI()
+ag = Client.from_file("./actguard.json")
+oai = openai.OpenAI()
 
 try:
-    with BudgetGuard(user_id="alice", usd_limit=0.05) as guard:
-        response = client.chat.completions.create(
+    with ag.budget_guard(user_id="alice", usd_limit=0.05) as guard:
+        response = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Summarise the history of Rome."}],
         )
@@ -44,27 +45,39 @@ finally:
     print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
 ```
 
-Set a token limit instead, or combine both — either limit triggers the error, whichever is hit first:
+Under the hood, `client.budget_guard(...)` reserves on enter (`POST /api/v1/reserve`)
+and settles on exit (`POST /api/v1/settle`) with your configured API key.
+
+Set different USD limits for different scopes:
 
 ```python
-with BudgetGuard(user_id="bob", token_limit=1_000) as guard:
+with ag.budget_guard(user_id="bob", usd_limit=0.02) as guard:
     ...
 
-with BudgetGuard(user_id="carol", token_limit=5_000, usd_limit=0.10) as guard:
+with ag.budget_guard(user_id="carol", usd_limit=0.10) as guard:
     ...
 ```
 
-`BudgetGuard` is also an async context manager:
+You can also layer budget scope on a run scope:
+
+```python
+with ag.run(user_id="alice"):
+    with ag.budget_guard(usd_limit=0.05):
+        ...
+```
+
+`client.budget_guard(...)` is also an async context manager:
 
 ```python
 import asyncio
 import openai
-from actguard import BudgetGuard
+from actguard import Client
 
 async def main():
-    client = openai.AsyncOpenAI()
-    async with BudgetGuard(user_id="dave", usd_limit=0.10) as guard:
-        response = await client.chat.completions.create(
+    ag = Client.from_file("./actguard.json")
+    oai = openai.AsyncOpenAI()
+    async with ag.budget_guard(user_id="dave", usd_limit=0.10) as guard:
+        response = await oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Hello!"}],
         )
@@ -76,8 +89,8 @@ asyncio.run(main())
 Streaming responses are fully supported — actguard wraps the iterator transparently and captures the usage chunk emitted at the end of the stream:
 
 ```python
-with BudgetGuard(user_id="eve", usd_limit=0.10) as guard:
-    stream = client.chat.completions.create(
+with ag.budget_guard(user_id="eve", usd_limit=0.10) as guard:
+    stream = oai.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": "Tell me a story."}],
         stream=True,
@@ -147,27 +160,31 @@ except ToolTimeoutError as e:
 Use `idempotent` to enforce at-most-once execution per `(tool, idempotency_key)` in a run:
 
 ```python
-from actguard import RunContext, idempotent
+import actguard
+from actguard import idempotent
 
 @idempotent(ttl_s=600)
 def create_invoice(user_id: str, amount_cents: int, *, idempotency_key: str) -> str:
     ...
 
-with RunContext():
+client = actguard.Client.from_file("./actguard.json")
+with client.run(user_id="alice"):
     invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
     same_invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
 ```
 
-`max_attempts` and `idempotent` rely on run-scoped state, so they require an active `RunContext`:
+`max_attempts` and `idempotent` rely on run-scoped state, so they require an active `client.run(...)` context:
 
 ```python
-from actguard import RunContext, max_attempts
+import actguard
+from actguard import max_attempts
 
 @max_attempts(calls=2)
 def lookup_customer(customer_id: str) -> dict:
     ...
 
-with RunContext(run_id="req-123"):
+client = actguard.Client.from_file("./actguard.json")
+with client.run(run_id="req-123"):
     lookup_customer("cus_1")
     lookup_customer("cus_1")
 ```
@@ -194,7 +211,7 @@ with actguard.session("req-9", {"user_id": "alice"}):
 
 If a write references an unproven id, `enforce` raises `GuardError` with code `MISSING_FACT`.
 
-`prove`/`enforce` use a chain-of-custody session, so they require `actguard.session(...)`. Use `RunContext` for `max_attempts`/`idempotent`.
+`prove`/`enforce` use a chain-of-custody session, so they require `actguard.session(...)`. Use `client.run(...)` for `max_attempts`/`idempotent`.
 
 ## Combine guards with @actguard.tool
 
@@ -202,7 +219,6 @@ Use the unified decorator when you want one declaration:
 
 ```python
 import actguard
-from actguard import RunContext
 
 @actguard.tool(
     idempotent={"ttl_s": 600, "on_duplicate": "return"},
@@ -214,7 +230,8 @@ from actguard import RunContext
 def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
     ...
 
-with RunContext():
+client = actguard.Client.from_file("./actguard.json")
+with client.run():
     search_web("alice", "latest earnings", idempotency_key="req-1")
 ```
 
@@ -227,32 +244,46 @@ with RunContext():
 - Use `idempotent` to deduplicate side-effectful tools.
 - Use `prove` + `enforce` to require read-before-write chain-of-custody.
 
-## Configure actguard (optional)
+## Create a client
 
-`actguard.configure()` wires in the ActGuard gateway so tool-guard checks can also be reported for global enforcement across processes. Decorators work with no configuration.
+Use `actguard.Client` as the runtime entry point. If you provide gateway/API settings, events can be shipped to ActGuard.
 
-Three ways to provide config:
+Two common ways to build a client:
 
-- **JSON file path**: pass a file containing `agent_id`, `gateway_url`, and `api_key`.
-- **Base64 JSON string**: pass a base64-encoded version of the same JSON.
-- **`ACTGUARD_CONFIG` env var**: set the variable and call `configure()` with no args.
+- **JSON file path**: create a file containing `gateway_url` and `api_key`.
+- **`ACTGUARD_CONFIG` env var**: set a base64 JSON blob or a JSON file path and call `Client.from_env()`.
 
 ```python
 import os
 import actguard
 
 # From a JSON file
-actguard.configure("./actguard.json")
+client = actguard.Client.from_file("./actguard.json")
 
-# From a base64 env var
-actguard.configure(os.environ["ACTGUARD_CONFIG"])
+# From ACTGUARD_CONFIG (base64 JSON or file path)
+client = actguard.Client.from_env()
 
-# Or read ACTGUARD_CONFIG directly
-actguard.configure()
-
-# Clear config
-actguard.configure(None)
+# Use as canonical runtime context
+with client.run(user_id="alice"):
+    ...
 ```
+
+## Default observability
+
+Inside `client.run(...)`, ActGuard emits runtime-scoped observability events for:
+
+- `tool.failure`
+- `guard.blocked`
+- `guard.intervention`
+
+Outside `client.run(...)`, SDK event emission is a no-op.
+
+Per-invocation success noise (`tool.invoked`, `tool.succeeded`) is off by default.
+Set `ACTGUARD_EMIT_ALL_TOOL_RUNS=1` to opt in.
+
+When model/usage/cost data is known, emitted envelopes include normalized top-level
+fields (`model`, `usd_micros`, `input_tokens`, `cached_input_tokens`, `output_tokens`)
+in addition to any provider-specific payload details.
 
 ## SDK Compatibility
 

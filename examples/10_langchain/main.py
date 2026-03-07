@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,8 @@ for candidate in (str(REPO_ROOT / "libs" / "sdk-py"), str(REPO_ROOT / "examples"
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-from actguard import BudgetGuard, RunContext, max_attempts
+import actguard
+from actguard import max_attempts
 from actguard.exceptions import (
     ActGuardError,
     CircuitOpenError,
@@ -30,7 +32,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticket_text")
     parser.add_argument("--mode", default="happy", choices=[m.value for m in Mode])
     parser.add_argument("--run_id")
-    parser.add_argument("--token_limit", type=int)
     parser.add_argument("--usd_limit", type=float)
     parser.add_argument("--no_llm", action="store_true")
     return parser.parse_args()
@@ -238,44 +239,52 @@ def main() -> int:
     def notify_with_max_attempts(user_id: str, channel: str, message: str) -> None:
         notify_oncall(user_id, channel, message)
 
-    with RunContext(run_id=args.run_id) as run:
-        with BudgetGuard(
-            user_id=args.user_id,
-            token_limit=args.token_limit,
-            usd_limit=args.usd_limit,
-        ) as budget:
-            if args.no_llm:
-                state = _run_nodes_directly(
-                    args, mode, ticket_id, ticket_text, notify_with_max_attempts
-                )
+    client = actguard.Client.from_env()
+    try:
+        with client.run(user_id=args.user_id, run_id=args.run_id) as run:
+            budget_scope = (
+                client.budget_guard(usd_limit=args.usd_limit)
+                if args.usd_limit is not None
+                else nullcontext(None)
+            )
+            with budget_scope as budget:
+                if args.no_llm:
+                    state = _run_nodes_directly(
+                        args, mode, ticket_id, ticket_text, notify_with_max_attempts
+                    )
+                else:
+                    from langchain_core.messages import HumanMessage
+
+                    agent, state = build_agent(
+                        args, mode, ticket_id, ticket_text, notify_with_max_attempts
+                    )
+                    agent.invoke(
+                        {"messages": [HumanMessage(content=f"Support ticket:\n{ticket_text}")]}
+                    )
+
+            result = {
+                "ticket_id": state["ticket_id"],
+                "urgent": state["urgent"],
+                "service": state["service"],
+                "status": state["status"],
+                "incident_id": state["incident_id"],
+                "notified": state["notified"],
+            }
+
+            print(f"Framework: langchain | run_id={run.run_id}")
+            print(f"Result: {result}")
+            print("Guards:")
+            if state["guards"]:
+                for item in state["guards"]:
+                    print(f"- {item}")
             else:
-                from langchain_core.messages import HumanMessage
-
-                agent, state = build_agent(
-                    args, mode, ticket_id, ticket_text, notify_with_max_attempts
-                )
-                agent.invoke(
-                    {"messages": [HumanMessage(content=f"Support ticket:\n{ticket_text}")]}
-                )
-
-        result = {
-            "ticket_id": state["ticket_id"],
-            "urgent": state["urgent"],
-            "service": state["service"],
-            "status": state["status"],
-            "incident_id": state["incident_id"],
-            "notified": state["notified"],
-        }
-
-        print(f"Framework: langchain | run_id={run.run_id}")
-        print(f"Result: {result}")
-        print("Guards:")
-        if state["guards"]:
-            for item in state["guards"]:
-                print(f"- {item}")
-        else:
-            print("- none")
-        print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
+                print("- none")
+            if budget is not None:
+                print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
+            else:
+                print("Budget: skipped (set --usd_limit and ACTGUARD_CONFIG to enable)")
+    finally:
+        client.close()
 
     return 0
 

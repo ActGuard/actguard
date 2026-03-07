@@ -16,25 +16,32 @@ def _parse_major_minor(version: str):
     return int(m.group(1)), int(m.group(2))
 
 
-def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> None:
-    state.tokens_used += input_tokens + output_tokens
+def _record_usage(
+    state,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+) -> None:
+    state.record_usage(
+        provider="openai",
+        provider_model_id=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+    )
     state.usd_used += get_cost("openai", model, input_tokens, output_tokens)
     from actguard.reporting import _emit_budget_consumed
-    _emit_budget_consumed(state, model, input_tokens, output_tokens)
+    _emit_budget_consumed(
+        state,
+        model,
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+    )
 
 
 def _check_limits(state) -> None:
-    if state.token_limit is not None and state.tokens_used >= state.token_limit:
-        from actguard.reporting import _emit_budget_blocked
-        _emit_budget_blocked(state)
-        raise BudgetExceededError(
-            user_id=state.user_id,
-            tokens_used=state.tokens_used,
-            usd_used=state.usd_used,
-            token_limit=state.token_limit,
-            usd_limit=state.usd_limit,
-            limit_type="token",
-        )
     if state.usd_limit is not None and state.usd_used >= state.usd_limit:
         from actguard.reporting import _emit_budget_blocked
         _emit_budget_blocked(state)
@@ -42,16 +49,30 @@ def _check_limits(state) -> None:
             user_id=state.user_id,
             tokens_used=state.tokens_used,
             usd_used=state.usd_used,
-            token_limit=state.token_limit,
             usd_limit=state.usd_limit,
             limit_type="usd",
         )
 
 
+def _get_cached_input_tokens(usage) -> int:
+    details = (
+        getattr(usage, "prompt_tokens_details", None)
+        or getattr(usage, "input_tokens_details", None)
+    )
+    if details is None:
+        return 0
+    return (
+        getattr(details, "cached_tokens", None)
+        or getattr(details, "cached_input_tokens", None)
+        or 0
+    )
+
+
 def _get_usage_tokens(usage) -> tuple:
     inp = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None) or 0
     out = getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None) or 0
-    return inp, out
+    cached = _get_cached_input_tokens(usage)
+    return inp, out, cached
 
 
 def _try_stream_usage(chunk):
@@ -180,8 +201,8 @@ def patch_openai() -> None:
 
         usage = getattr(result, "usage", None)
         if usage is not None:
-            inp, out = _get_usage_tokens(usage)
-            _record_usage(state, model, inp, out)
+            inp, out, cached = _get_usage_tokens(usage)
+            _record_usage(state, model, inp, out, cached)
         _check_limits(state)
         return result
 
@@ -204,8 +225,8 @@ def patch_openai() -> None:
 
         usage = getattr(result, "usage", None)
         if usage is not None:
-            inp, out = _get_usage_tokens(usage)
-            _record_usage(state, model, inp, out)
+            inp, out, cached = _get_usage_tokens(usage)
+            _record_usage(state, model, inp, out, cached)
         _check_limits(state)
         return result
 

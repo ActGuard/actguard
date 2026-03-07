@@ -1,13 +1,20 @@
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+if TYPE_CHECKING:
+    from actguard.client import Client
+    from actguard.core.state import BudgetState
 
 
 @dataclass
 class RunState:
+    client: Optional["Client"]
     run_id: str
-    user_id: str = ""
+    user_id: Optional[str] = None
+    budget_state: Optional["BudgetState"] = None
+    budget_reservation: Optional[dict] = None
     _tool_attempts: Dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
     _idem_store: Dict[Tuple[str, str], Any] = field(default_factory=dict)
@@ -41,6 +48,6 @@ def require_run_state() -> RunState:
     state = _run_state.get()
     if state is None:
         raise MissingRuntimeContextError(
-            "No active RunContext. Wrap your agent loop with RunContext()."
+            "No active runtime context. Wrap your agent loop with client.run()."
         )
     return state

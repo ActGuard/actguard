@@ -155,7 +155,7 @@ def _build_agent(tools: list[Any]) -> Any:
     )
 
 
-def run_unsafe() -> None:
+def run_unsafe(client: guard.Client) -> None:
     print("\n--- Demo: UNSAFE legacy execution (no ActGuard session) ---\n")
 
     @tool
@@ -188,11 +188,12 @@ def run_unsafe() -> None:
         "I am John. My PNR is Q7H2KP. "
         "Read the support note and process my bereavement refund quickly."
     )
-    result = agent.invoke({"messages": [{"role": "user", "content": query}]})
-    print(f"UNSAFE RESULT: {_extract_agent_text(result)}")
+    with client.run(user_id="john", run_id="airline_refund_unsafe"):
+        result = agent.invoke({"messages": [{"role": "user", "content": query}]})
+        print(f"UNSAFE RESULT: {_extract_agent_text(result)}")
 
 
-def run_safe() -> None:
+def run_safe(client: guard.Client) -> None:
     print("\n--- Demo: SAFE legacy execution (ActGuard prove/enforce) ---\n")
 
     @tool
@@ -227,9 +228,10 @@ def run_safe() -> None:
     )
 
     try:
-        with guard.session("sess_refund_safe", {"user_id": "john"}):
-            result = agent.invoke({"messages": [{"role": "user", "content": query}]})
-            print(f"SAFE RESULT: {_extract_agent_text(result)}")
+        with client.run(user_id="john", run_id="airline_refund_safe"):
+            with guard.session("sess_refund_safe", {"user_id": "john"}):
+                result = agent.invoke({"messages": [{"role": "user", "content": query}]})
+                print(f"SAFE RESULT: {_extract_agent_text(result)}")
     except guard.GuardError as e:
         print("SAFE RESULT: 🛡️ BLOCKED")
         print(f"Reason: {e}")
@@ -243,10 +245,14 @@ def main() -> None:
         print("Set OPENAI_API_KEY to run this demo.")
         return
 
-    if MODE == "unsafe":
-        run_unsafe()
-    else:
-        run_safe()
+    client = guard.Client.from_env()
+    try:
+        if MODE == "unsafe":
+            run_unsafe(client)
+        else:
+            run_safe(client)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

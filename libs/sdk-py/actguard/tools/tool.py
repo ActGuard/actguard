@@ -1,6 +1,8 @@
 import functools
 import inspect
 
+from ._observability import emit_all_tool_runs_enabled, emit_tool_failure
+
 
 def tool(
     fn=None,
@@ -64,10 +66,12 @@ def tool(
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def _async_wrap(*args, **kwargs):
-            _emit_tool_invoked(tool_qname)
+            if emit_all_tool_runs_enabled():
+                _emit_tool_invoked(tool_qname)
             try:
                 result = await wrapped(*args, **kwargs)
-                _emit_tool_succeeded(tool_qname)
+                if emit_all_tool_runs_enabled():
+                    _emit_tool_succeeded(tool_qname)
                 return result
             except Exception as exc:
                 _emit_tool_error(tool_qname, exc)
@@ -77,10 +81,12 @@ def tool(
 
     @functools.wraps(fn)
     def _sync_wrap(*args, **kwargs):
-        _emit_tool_invoked(tool_qname)
+        if emit_all_tool_runs_enabled():
+            _emit_tool_invoked(tool_qname)
         try:
             result = wrapped(*args, **kwargs)
-            _emit_tool_succeeded(tool_qname)
+            if emit_all_tool_runs_enabled():
+                _emit_tool_succeeded(tool_qname)
             return result
         except Exception as exc:
             _emit_tool_error(tool_qname, exc)
@@ -106,34 +112,13 @@ def _emit_tool_succeeded(tool_name: str) -> None:
 
 
 def _emit_tool_error(tool_name: str, exc: Exception) -> None:
-    try:
-        from actguard.exceptions import ActGuardViolation, ToolGuardError
-        from actguard.reporting import emit_event
+    from actguard.exceptions import ActGuardViolation, ToolGuardError
 
-        if isinstance(exc, ToolGuardError):
-            emit_event(
-                "tool",
-                "blocked",
-                {
-                    "tool_name": tool_name,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-                severity="error",
-                outcome="blocked",
-            )
-        elif not isinstance(exc, ActGuardViolation):
-            emit_event(
-                "tool",
-                "failed",
-                {
-                    "tool_name": tool_name,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-                severity="error",
-                outcome="failed",
-            )
-        # ActGuardViolation (non-guard) has its own reporting path via emit_violation
-    except Exception:
-        pass
+    # Guard decorators emit guard.blocked / guard.intervention directly.
+    if isinstance(exc, ToolGuardError):
+        return
+    # ActGuardViolation has its own emit_violation path.
+    if isinstance(exc, ActGuardViolation):
+        return
+
+    emit_tool_failure(tool_name, exc)

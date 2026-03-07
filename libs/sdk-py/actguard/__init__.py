@@ -1,11 +1,13 @@
 """actguard Python SDK."""
 
-from ._config import configure
 from .budget import BudgetGuard
+from .client import Client
 from .exceptions import (
     ActGuardError,
     ActGuardViolation,
+    BudgetClientMismatchError,
     BudgetExceededError,
+    BudgetTransportError,
     CircuitOpenError,
     DuplicateIdempotencyKey,
     GuardError,
@@ -15,13 +17,14 @@ from .exceptions import (
     MaxAttemptsExceeded,
     MissingIdempotencyKeyError,
     MissingRuntimeContextError,
+    NestedBudgetGuardError,
     RateLimitExceeded,
     ToolExecutionError,
     ToolGuardError,
     ToolTimeoutError,
 )
 from .reporting import emit_event, emit_violation
-from .run_context import RunContext, session
+from .session import session
 from .tools import (
     FAIL_ON_DEFAULT,
     FAIL_ON_INFRA_ONLY,
@@ -49,9 +52,11 @@ __all__ = [
     "ActGuardViolation",
     "BlockRegex",
     "BudgetGuard",
+    "BudgetClientMismatchError",
     "BudgetExceededError",
+    "BudgetTransportError",
+    "Client",
     "CircuitOpenError",
-    "configure",
     "circuit_breaker",
     "DuplicateIdempotencyKey",
     "emit_event",
@@ -71,11 +76,11 @@ __all__ = [
     "MaxAttemptsExceeded",
     "MissingIdempotencyKeyError",
     "MissingRuntimeContextError",
+    "NestedBudgetGuardError",
     "prove",
     "rate_limit",
     "RateLimitExceeded",
     "RequireFact",
-    "RunContext",
     "session",
     "shutdown",
     "Threshold",

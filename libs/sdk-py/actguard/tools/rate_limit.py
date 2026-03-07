@@ -1,12 +1,11 @@
 import functools
 import inspect
 import time
-from datetime import datetime, timezone
 from typing import Optional
 
-from .._gateway import report_event
 from ..exceptions import RateLimitExceeded
 from ._cache import get_cache
+from ._observability import emit_guard_blocked
 from ._scope import extract_arg, validate_scope
 
 
@@ -49,19 +48,28 @@ def rate_limit(
 
             if len(timestamps) >= max_calls:
                 retry_after = timestamps[0] + period - now
-                _report(fn, scope_val, allowed=False, retry_after=retry_after)
-                raise RateLimitExceeded(
+                error = RateLimitExceeded(
                     func_name=fn.__qualname__,
                     scope_value=scope_val,
                     max_calls=max_calls,
                     period=period,
                     retry_after=retry_after,
                 )
+                emit_guard_blocked(
+                    fn.__qualname__,
+                    "rate_limit",
+                    error,
+                    extra={
+                        "max_calls": max_calls,
+                        "period": period,
+                        "scope_value": scope_val,
+                        "retry_after": retry_after,
+                    },
+                )
+                raise error
 
             timestamps.append(now)
             cache.set(key, timestamps)
-
-        _report(fn, scope_val, allowed=True)
 
     if is_async:
         @functools.wraps(fn)
@@ -75,18 +83,3 @@ def rate_limit(
             return fn(*args, **kwargs)
 
     return wrapper
-
-
-def _report(
-    fn, scope_val: str, *, allowed: bool, retry_after: Optional[float] = None
-) -> None:
-    event = {
-        "type": "rate_limit_check" if allowed else "rate_limit_exceeded",
-        "func": fn.__qualname__,
-        "scope_value": scope_val,
-        "allowed": allowed,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    if retry_after is not None:
-        event["retry_after"] = retry_after
-    report_event(event)

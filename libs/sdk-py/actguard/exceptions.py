@@ -62,15 +62,41 @@ class CircuitOpenError(ToolGuardError):
 
 
 class MissingRuntimeContextError(ToolGuardError):
-    """Raised when @max_attempts is called without an active RunContext."""
+    """Raised when run-scoped guards execute without an active runtime context."""
 
     def __init__(self, message: str = "") -> None:
-        default = "No active RunContext. Wrap your agent loop with RunContext()."
+        default = "No active runtime context. Wrap your agent loop with client.run()."
         super().__init__(message or default)
 
 
+class NestedBudgetGuardError(ToolGuardError):
+    """Raised when budget_guard is entered while another budget scope is active."""
+
+    def __init__(self, message: str = "") -> None:
+        default = (
+            "Nested budget scopes are not supported. "
+            "Use one active client.budget_guard(...) per run."
+        )
+        super().__init__(message or default)
+
+
+class BudgetClientMismatchError(ToolGuardError):
+    """Raised when budget_guard client does not match active run client."""
+
+    def __init__(self, message: str = "") -> None:
+        default = (
+            "Active runtime belongs to a different Client. "
+            "Use the same client instance for run and budget_guard."
+        )
+        super().__init__(message or default)
+
+
+class BudgetTransportError(ActGuardError):
+    """Raised when reserve/settle transport calls fail."""
+
+
 class MaxAttemptsExceeded(ToolGuardError, ActGuardViolation):
-    """Raised when a tool exceeds its max_attempts cap within a RunContext."""
+    """Raised when a tool exceeds its max_attempts cap within an active run."""
 
     code = "guard.max_attempts_exceeded"
 
@@ -189,30 +215,26 @@ class BudgetExceededError(ActGuardViolation):
     def __init__(
         self,
         *,
-        user_id: str,
+        user_id: Optional[str],
         tokens_used: int,
         usd_used: float,
-        token_limit: Optional[int],
         usd_limit: Optional[float],
-        limit_type: Literal["token", "usd"],
+        limit_type: Literal["usd"],
     ) -> None:
         self.user_id = user_id
         self.tokens_used = tokens_used
         self.usd_used = usd_used
-        self.token_limit = token_limit
         self.usd_limit = usd_limit
         self.limit_type = limit_type
 
-        if limit_type == "token":
-            msg = (
-                f"Token limit exceeded for user '{user_id}': "
-                f"{tokens_used} / {token_limit} tokens used"
-            )
-        else:
-            msg = (
-                f"USD limit exceeded for user '{user_id}': "
-                f"${usd_used:.6f} / ${usd_limit:.6f} used"
-            )
+        user_label = user_id if user_id is not None else "<unknown>"
+        limit_label = (
+            f"${usd_limit:.6f}" if usd_limit is not None else "<unknown>"
+        )
+        msg = (
+            f"USD limit exceeded for user '{user_label}': "
+            f"${usd_used:.6f} / {limit_label} used"
+        )
         Exception.__init__(self, msg)
 
     def payload(self) -> dict:
@@ -220,7 +242,6 @@ class BudgetExceededError(ActGuardViolation):
             "user_id": self.user_id,
             "tokens_used": self.tokens_used,
             "usd_used": self.usd_used,
-            "token_limit": self.token_limit,
             "usd_limit": self.usd_limit,
             "limit_type": self.limit_type,
         }
