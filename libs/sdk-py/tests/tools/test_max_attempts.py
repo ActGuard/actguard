@@ -6,8 +6,9 @@ import pytest
 
 import actguard
 from actguard.exceptions import MaxAttemptsExceeded, MissingRuntimeContextError
-from actguard.run_context import RunContext
 from actguard.tools.max_attempts import max_attempts
+
+_CLIENT = actguard.Client()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,7 +30,7 @@ def _make_fn(calls):
 
 def test_allows_calls_up_to_limit():
     fn = _make_fn(3)
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         assert fn() == "ok"
         assert fn() == "ok"
@@ -37,7 +38,7 @@ def test_allows_calls_up_to_limit():
 
 def test_raises_on_exceeding_limit():
     fn = _make_fn(2)
-    with RunContext():
+    with _CLIENT.run():
         fn()
         fn()
         with pytest.raises(MaxAttemptsExceeded):
@@ -46,7 +47,7 @@ def test_raises_on_exceeding_limit():
 
 def test_exactly_one_call_allowed():
     fn = _make_fn(1)
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
             fn()
@@ -54,7 +55,7 @@ def test_exactly_one_call_allowed():
 
 def test_exception_fields_match_spec():
     fn = _make_fn(2)
-    with RunContext(run_id="test-run-42"):
+    with _CLIENT.run(run_id="test-run-42"):
         fn()
         fn()
         with pytest.raises(MaxAttemptsExceeded) as exc_info:
@@ -69,7 +70,7 @@ def test_exception_fields_match_spec():
 
 def test_exception_message_format():
     fn = _make_fn(1)
-    with RunContext(run_id="run-abc"):
+    with _CLIENT.run(run_id="run-abc"):
         fn()
         with pytest.raises(MaxAttemptsExceeded) as exc_info:
             fn()
@@ -83,13 +84,13 @@ def test_exception_message_format():
 
 def test_counter_resets_between_runs():
     fn = _make_fn(1)
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
             fn()
 
     # Second run gets a fresh counter
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
 
 
@@ -100,7 +101,7 @@ def test_failed_tool_still_increments():
     def flaky():
         raise ValueError("boom")
 
-    with RunContext():
+    with _CLIENT.run():
         with pytest.raises(ValueError):
             flaky()
         with pytest.raises(ValueError):
@@ -119,7 +120,7 @@ def test_independent_counters_per_tool():
     def fn_b():
         return "b"
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn_a() == "a"
         assert fn_b() == "b"
         with pytest.raises(MaxAttemptsExceeded):
@@ -139,7 +140,7 @@ async def test_async_allows_up_to_limit():
     async def fn():
         return "async-ok"
 
-    async with RunContext():
+    async with _CLIENT.run():
         assert await fn() == "async-ok"
         assert await fn() == "async-ok"
 
@@ -150,7 +151,7 @@ async def test_async_raises_on_exceeding():
     async def fn():
         return "ok"
 
-    async with RunContext():
+    async with _CLIENT.run():
         await fn()
         with pytest.raises(MaxAttemptsExceeded):
             await fn()
@@ -162,10 +163,10 @@ async def test_async_counter_resets_between_runs():
     async def fn():
         return "ok"
 
-    async with RunContext():
+    async with _CLIENT.run():
         assert await fn() == "ok"
 
-    async with RunContext():
+    async with _CLIENT.run():
         assert await fn() == "ok"
 
 
@@ -201,7 +202,7 @@ def test_tool_decorator_max_attempts_kwarg():
     def fn():
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         assert fn() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
@@ -216,7 +217,7 @@ def test_tool_decorator_stacked_with_rate_limit():
     def fn():
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         assert fn() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
@@ -231,7 +232,7 @@ def test_tool_decorator_stacked_with_circuit_breaker():
     def fn():
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         assert fn() == "ok"
         assert fn() == "ok"
@@ -254,7 +255,7 @@ def test_missing_runtime_context_error_message():
     fn = _make_fn(5)
     with pytest.raises(MissingRuntimeContextError) as exc_info:
         fn()
-    assert "RunContext" in str(exc_info.value)
+    assert "client.run" in str(exc_info.value)
 
 
 def test_missing_runtime_context_error_is_tool_guard_error():
@@ -289,7 +290,7 @@ def test_thread_safety_exactly_n_ok():
     results = []
     lock = threading.Lock()
 
-    with RunContext():
+    with _CLIENT.run():
         ctx = contextvars.copy_context()
 
         def worker():
@@ -317,13 +318,13 @@ def test_thread_safety_exactly_n_ok():
 
 
 # ---------------------------------------------------------------------------
-# Introspection — RunContext
+# Introspection — client.run(...)
 # ---------------------------------------------------------------------------
 
 
-def test_run_context_get_attempt_count():
+def test_client_run_get_attempt_count():
     fn = _make_fn(10)
-    with RunContext() as ctx:
+    with _CLIENT.run() as ctx:
         tool_id = f"{fn.__wrapped__.__module__}:{fn.__wrapped__.__qualname__}"
         assert ctx.get_attempt_count(tool_id) == 0
         fn()
@@ -332,14 +333,14 @@ def test_run_context_get_attempt_count():
         assert ctx.get_attempt_count(tool_id) == 2
 
 
-def test_run_context_auto_uuid_is_unique():
-    ctx1 = RunContext()
-    ctx2 = RunContext()
+def test_client_run_auto_uuid_is_unique():
+    ctx1 = _CLIENT.run()
+    ctx2 = _CLIENT.run()
     assert ctx1.run_id != ctx2.run_id
 
 
-def test_run_context_explicit_run_id_preserved():
-    ctx = RunContext(run_id="my-explicit-id")
+def test_client_run_explicit_run_id_preserved():
+    ctx = _CLIENT.run(run_id="my-explicit-id")
     assert ctx.run_id == "my-explicit-id"
 
     with ctx:
@@ -348,9 +349,9 @@ def test_run_context_explicit_run_id_preserved():
     assert ctx.run_id == "my-explicit-id"
 
 
-def test_run_context_run_id_in_exception():
+def test_client_run_run_id_in_exception():
     fn = _make_fn(1)
-    with RunContext(run_id="explicit-run"):
+    with _CLIENT.run(run_id="explicit-run"):
         fn()
         with pytest.raises(MaxAttemptsExceeded) as exc_info:
             fn()
@@ -393,7 +394,7 @@ def test_decorator_with_parens_style():
     def fn():
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
         assert fn() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
@@ -406,7 +407,7 @@ def test_decorator_explicit_fn_argument():
 
     guarded = max_attempts(fn, calls=2)
 
-    with RunContext():
+    with _CLIENT.run():
         assert guarded() == "ok"
         assert guarded() == "ok"
         with pytest.raises(MaxAttemptsExceeded):
@@ -414,16 +415,16 @@ def test_decorator_explicit_fn_argument():
 
 
 # ---------------------------------------------------------------------------
-# Nested RunContext — inner context is independent
+# Nested client.run(...) — inner context is independent
 # ---------------------------------------------------------------------------
 
 
-def test_nested_run_contexts_are_independent():
+def test_nested_runs_are_independent():
     fn = _make_fn(1)
 
-    with RunContext():
+    with _CLIENT.run():
         assert fn() == "ok"
-        with RunContext():
+        with _CLIENT.run():
             # Inner context has fresh state
             assert fn() == "ok"
             with pytest.raises(MaxAttemptsExceeded):
@@ -439,7 +440,7 @@ def test_nested_run_contexts_are_independent():
 
 
 def test_public_imports():
-    assert hasattr(actguard, "RunContext")
+    assert not hasattr(actguard, "RunContext")
     assert hasattr(actguard, "max_attempts")
     assert hasattr(actguard, "MaxAttemptsExceeded")
     assert hasattr(actguard, "MissingRuntimeContextError")
@@ -454,7 +455,7 @@ def test_missing_runtime_context_error_in_all():
 
 
 def test_run_context_in_all():
-    assert "RunContext" in actguard.__all__
+    assert "RunContext" not in actguard.__all__
 
 
 def test_max_attempts_in_all():

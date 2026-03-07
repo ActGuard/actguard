@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
+from ._observability import emit_guard_blocked, emit_guard_intervention
+
 
 @dataclass
 class IdemEntry:
@@ -78,7 +80,7 @@ def idempotent(
     on_duplicate: Literal["return", "raise"] = "return",
     safe_exceptions: tuple = (),
 ):
-    """Enforce at-most-once execution per (tool_id, idempotency_key) in a RunContext."""
+    """Enforce at-most-once execution per (tool_id, idempotency_key) in a run."""
     if fn is None:
         return lambda f: idempotent(
             f,
@@ -111,15 +113,28 @@ def idempotent(
             state = require_run_state()
             key = kwargs.get("idempotency_key")
             if not key:
-                raise MissingIdempotencyKeyError(tool_id)
+                error = MissingIdempotencyKeyError(tool_id)
+                emit_guard_blocked(tool_id, "idempotent", error)
+                raise error
 
-            with state._idem_lock:
-                outcome = _check_and_acquire(state, tool_id, key, ttl_s)
+            try:
+                with state._idem_lock:
+                    outcome = _check_and_acquire(state, tool_id, key, ttl_s)
+            except Exception as exc:
+                emit_guard_blocked(tool_id, "idempotent", exc)
+                raise
 
             if outcome != "ACQUIRED":
                 # outcome is ("DONE", result)
                 if on_duplicate == "raise":
-                    raise DuplicateIdempotencyKey(tool_id, key)
+                    error = DuplicateIdempotencyKey(tool_id, key)
+                    emit_guard_blocked(tool_id, "idempotent", error)
+                    raise error
+                emit_guard_intervention(
+                    tool_id,
+                    "idempotent",
+                    extra={"action": "return_cached"},
+                )
                 return outcome[1]
 
             try:
@@ -148,15 +163,28 @@ def idempotent(
             state = require_run_state()
             key = kwargs.get("idempotency_key")
             if not key:
-                raise MissingIdempotencyKeyError(tool_id)
+                error = MissingIdempotencyKeyError(tool_id)
+                emit_guard_blocked(tool_id, "idempotent", error)
+                raise error
 
-            with state._idem_lock:
-                outcome = _check_and_acquire(state, tool_id, key, ttl_s)
+            try:
+                with state._idem_lock:
+                    outcome = _check_and_acquire(state, tool_id, key, ttl_s)
+            except Exception as exc:
+                emit_guard_blocked(tool_id, "idempotent", exc)
+                raise
 
             if outcome != "ACQUIRED":
                 # outcome is ("DONE", result)
                 if on_duplicate == "raise":
-                    raise DuplicateIdempotencyKey(tool_id, key)
+                    error = DuplicateIdempotencyKey(tool_id, key)
+                    emit_guard_blocked(tool_id, "idempotent", error)
+                    raise error
+                emit_guard_intervention(
+                    tool_id,
+                    "idempotent",
+                    extra={"action": "return_cached"},
+                )
                 return outcome[1]
 
             try:

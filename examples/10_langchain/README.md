@@ -13,15 +13,16 @@ This example shows the support-triage flow using `create_agent` — a single age
 ## Execution order
 
 1. Parse CLI args
-2. Enter `RunContext` (required for `idempotent` and `max_attempts`)
-3. Enter `BudgetGuard`
-4. Run 5 stages via `create_agent` (LLM mode) or directly (with `--no_llm`):
+2. Build `client = actguard.Client.from_env()`
+3. Enter `client.run(...)` (required for `idempotent` and `max_attempts`)
+4. Optionally enter `client.budget_guard(usd_limit=...)` when `--usd_limit` is set
+5. Run 5 stages via `create_agent` (LLM mode) or directly (with `--no_llm`):
    - **summarize_tool** — summarize ticket text
    - **status_tool** — check service status (circuit-breaker + timeout)
    - **decision_tool** — decide whether to create an incident
    - **incident_tool** — create incident if needed (idempotent)
    - **notify_tool** — notify on-call (rate-limited + max attempts)
-5. Print result, guard errors, budget totals
+6. Print result, guard errors, budget totals
 
 ## Install
 
@@ -42,6 +43,14 @@ python main.py --mode dependency_down --no_llm
 python main.py --mode loop --no_llm
 python main.py --mode retry_duplicate --no_llm
 ```
+
+Optional budget scope (reserve/settle-backed):
+
+```bash
+python main.py --mode happy --no_llm --usd_limit 0.05
+```
+
+`client.budget_guard(...)` requires ActGuard gateway config (for reserve/settle), typically via `ACTGUARD_CONFIG`.
 
 ## Run with LLM
 

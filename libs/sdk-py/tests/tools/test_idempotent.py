@@ -15,8 +15,9 @@ from actguard.exceptions import (
     MissingIdempotencyKeyError,
     MissingRuntimeContextError,
 )
-from actguard.run_context import RunContext
 from actguard.tools.idempotent import idempotent
+
+_CLIENT = actguard.Client()
 
 # ---------------------------------------------------------------------------
 # Test 1: Basic deduplication (sync)
@@ -32,7 +33,7 @@ def test_basic_deduplication_sync():
         call_count += 1
         return "result"
 
-    with RunContext():
+    with _CLIENT.run():
         r1 = my_tool(idempotency_key="key-1")
         r2 = my_tool(idempotency_key="key-1")
 
@@ -56,7 +57,7 @@ async def test_basic_deduplication_async():
         call_count += 1
         return "async-result"
 
-    async with RunContext():
+    async with _CLIENT.run():
         r1 = await my_async_tool(idempotency_key="key-async")
         r2 = await my_async_tool(idempotency_key="key-async")
 
@@ -88,7 +89,7 @@ def test_concurrency_in_progress_raises():
         time.sleep(0.05)
         return "done"
 
-    with RunContext():
+    with _CLIENT.run():
         # Two separate copies — same RunState reference, different Context objects.
         ctx1 = contextvars.copy_context()
         ctx2 = contextvars.copy_context()
@@ -125,7 +126,7 @@ def test_on_duplicate_raise():
     def my_tool(idempotency_key: str):
         return "result"
 
-    with RunContext():
+    with _CLIENT.run():
         my_tool(idempotency_key="key-dup")
         with pytest.raises(DuplicateIdempotencyKey) as exc_info:
             my_tool(idempotency_key="key-dup")
@@ -149,7 +150,7 @@ def test_unsafe_failure_blocks_retry():
         call_count += 1
         raise ConnectionError("network down")
 
-    with RunContext():
+    with _CLIENT.run():
         with pytest.raises(ConnectionError):
             my_tool(idempotency_key="key-unsafe")
 
@@ -178,7 +179,7 @@ def test_safe_failure_allows_retry():
             raise ValueError("safe error")
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         with pytest.raises(ValueError):
             my_tool(idempotency_key="key-safe")
 
@@ -205,7 +206,7 @@ def test_ttl_expiry_allows_reexecution(monkeypatch):
         call_count += 1
         return f"result-{call_count}"
 
-    with RunContext():
+    with _CLIENT.run():
         r1 = my_tool(idempotency_key="key-ttl")
         assert call_count == 1
         assert r1 == "result-1"
@@ -241,7 +242,7 @@ def test_none_key_raises_missing_idempotency_key_error():
     def my_tool(idempotency_key: str):
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         with pytest.raises(MissingIdempotencyKeyError) as exc_info:
             my_tool(idempotency_key=None)
 
@@ -253,17 +254,17 @@ def test_empty_string_key_raises_missing_idempotency_key_error():
     def my_tool(idempotency_key: str):
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         with pytest.raises(MissingIdempotencyKeyError):
             my_tool(idempotency_key="")
 
 
 # ---------------------------------------------------------------------------
-# Test 10: No RunContext → MissingRuntimeContextError
+# Test 10: No active client.run(...) → MissingRuntimeContextError
 # ---------------------------------------------------------------------------
 
 
-def test_no_run_context_raises():
+def test_no_active_runtime_context_raises():
     @idempotent
     def my_tool(idempotency_key: str):
         return "ok"
@@ -286,7 +287,7 @@ def test_tool_unified_decorator_integration():
         call_count += 1
         return "ok"
 
-    with RunContext():
+    with _CLIENT.run():
         r1 = my_tool(idempotency_key="unified-key")
         r2 = my_tool(idempotency_key="unified-key")
 
@@ -309,7 +310,7 @@ def test_different_keys_are_independent():
         call_count += 1
         return call_count
 
-    with RunContext():
+    with _CLIENT.run():
         r1 = my_tool(idempotency_key="key-a")
         r2 = my_tool(idempotency_key="key-b")
         r3 = my_tool(idempotency_key="key-a")
@@ -336,11 +337,11 @@ def test_functools_wraps_preserved():
 
 
 # ---------------------------------------------------------------------------
-# Additional: state resets between RunContexts
+# Additional: state resets between runs
 # ---------------------------------------------------------------------------
 
 
-def test_state_resets_between_run_contexts():
+def test_state_resets_between_runs():
     call_count = 0
 
     @idempotent
@@ -349,11 +350,11 @@ def test_state_resets_between_run_contexts():
         call_count += 1
         return call_count
 
-    with RunContext():
+    with _CLIENT.run():
         my_tool(idempotency_key="key-1")
 
-    with RunContext():
-        # New RunContext → fresh state → tool runs again
+    with _CLIENT.run():
+        # New run → fresh state → tool runs again
         result = my_tool(idempotency_key="key-1")
 
     assert call_count == 2

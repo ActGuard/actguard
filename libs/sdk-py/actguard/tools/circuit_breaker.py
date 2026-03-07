@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from ..exceptions import CircuitOpenError
+from ._observability import emit_guard_blocked
 
 
 class FailureKind(str, Enum):
@@ -95,7 +96,16 @@ def circuit_breaker(
 
         @functools.wraps(fn)
         async def async_wrapper(*args, **kwargs):
-            _precheck_open(state, name=name, reset_timeout=reset_timeout)
+            try:
+                _precheck_open(state, name=name, reset_timeout=reset_timeout)
+            except CircuitOpenError as exc:
+                emit_guard_blocked(
+                    fn.__qualname__,
+                    "circuit_breaker",
+                    exc,
+                    extra={"dependency_name": name, "reset_at": exc.reset_at},
+                )
+                raise
 
             try:
                 result = await fn(*args, **kwargs)
@@ -124,7 +134,16 @@ def circuit_breaker(
 
     @functools.wraps(fn)
     def sync_wrapper(*args, **kwargs):
-        _precheck_open(state, name=name, reset_timeout=reset_timeout)
+        try:
+            _precheck_open(state, name=name, reset_timeout=reset_timeout)
+        except CircuitOpenError as exc:
+            emit_guard_blocked(
+                fn.__qualname__,
+                "circuit_breaker",
+                exc,
+                extra={"dependency_name": name, "reset_at": exc.reset_at},
+            )
+            raise
 
         try:
             result = fn(*args, **kwargs)

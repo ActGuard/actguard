@@ -1,4 +1,5 @@
 """Tests for BudgetGuard core behaviour (no real LLM calls)."""
+from contextlib import contextmanager
 import json
 import sys
 from types import ModuleType, SimpleNamespace
@@ -6,11 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import actguard.integrations.openai as _oai_mod
+import actguard
 import actguard.integrations.anthropic as _ant_mod
-from actguard import BudgetGuard, BudgetExceededError
-from actguard.core.state import get_current_state
+import actguard.integrations.openai as _oai_mod
+from actguard import BudgetExceededError, NestedBudgetGuardError
 from actguard.core.pricing import get_cost
+from actguard.core.state import get_current_state
 
 
 # ---------------------------------------------------------------------------
@@ -53,13 +55,29 @@ class _AsyncIter:
             yield item
 
 
+@contextmanager
+def _with_runtime_budget_state(state):
+    client = actguard.Client()
+    with client.run(run_id="test-budget-runtime"):
+        from actguard.core.run_context import require_run_state
+
+        run_state = require_run_state()
+        previous = run_state.budget_state
+        run_state.budget_state = state
+        try:
+            yield
+        finally:
+            run_state.budget_state = previous
+    client.close()
+
+
 # ---------------------------------------------------------------------------
 # OpenAI mock fixture
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def openai_mocks():
-    from openai._base_client import SyncAPIClient, AsyncAPIClient
+    from openai._base_client import AsyncAPIClient, SyncAPIClient
 
     # Save original state
     orig_request = SyncAPIClient.request
@@ -72,7 +90,7 @@ def openai_mocks():
     SyncAPIClient.request = sync_mock
     AsyncAPIClient.request = async_mock
 
-    # Reset so patch_openai() will run on the next BudgetGuard.__enter__()
+    # Reset so patch_openai() will run on the next budget_guard.__enter__()
     _oai_mod._patched = False
 
     yield sync_mock, async_mock
@@ -85,7 +103,7 @@ def openai_mocks():
 
 @pytest.fixture
 def anthropic_mocks():
-    from anthropic._base_client import SyncAPIClient, AsyncAPIClient
+    from anthropic._base_client import AsyncAPIClient, SyncAPIClient
 
     orig_request = SyncAPIClient.request
     orig_async_request = AsyncAPIClient.request
@@ -102,6 +120,36 @@ def anthropic_mocks():
     SyncAPIClient.request = orig_request
     AsyncAPIClient.request = orig_async_request
     _ant_mod._patched = orig_patched
+
+
+@pytest.fixture(autouse=True)
+def stub_budget_transport(monkeypatch):
+    def reserve_budget(self, *, run_id, usd_limit_micros):
+        return "res-test"
+
+    def settle_budget(
+        self,
+        *,
+        reserve_id,
+        run_id,
+        provider,
+        provider_model_id,
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+    ):
+        return None
+
+    monkeypatch.setattr(
+        actguard.Client,
+        "reserve_budget",
+        reserve_budget,
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "settle_budget",
+        settle_budget,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,50 +187,51 @@ class TestPricing:
 class TestBudgetGuard:
     def test_state_set_and_cleared(self):
         assert get_current_state() is None
-        with BudgetGuard(user_id="alice") as g:
+        with actguard.Client().budget_guard(user_id="alice", usd_limit=1.0):
             state = get_current_state()
             assert state is not None
             assert state.user_id == "alice"
         assert get_current_state() is None
 
-    def test_nesting_restores_outer_state(self):
-        with BudgetGuard(user_id="outer") as outer:
-            with BudgetGuard(user_id="inner") as inner:
-                assert get_current_state().user_id == "inner"
-            assert get_current_state().user_id == "outer"
-        assert get_current_state() is None
+    def test_nested_budget_guard_raises_clear_error(self):
+        client = actguard.Client()
+        with client.budget_guard(user_id="outer", usd_limit=1.0):
+            with pytest.raises(NestedBudgetGuardError):
+                with client.budget_guard(user_id="inner", usd_limit=1.0):
+                    pass
 
     def test_exception_propagated_and_state_cleared(self):
         with pytest.raises(ValueError):
-            with BudgetGuard(user_id="alice") as g:
+            with actguard.Client().budget_guard(user_id="alice", usd_limit=1.0):
                 raise ValueError("boom")
         assert get_current_state() is None
 
     def test_run_id_generated_on_enter(self):
-        with BudgetGuard(user_id="alice") as g:
+        with actguard.Client().budget_guard(user_id="alice", usd_limit=1.0) as g:
             assert g.run_id is not None
-            assert g.run_id.startswith("run_")
 
     def test_run_state_set_and_cleared(self):
         from actguard.core.run_context import get_run_state
 
         assert get_run_state() is None
-        with BudgetGuard(user_id="alice") as g:
+        with actguard.Client().budget_guard(user_id="alice", usd_limit=1.0) as g:
             state = get_run_state()
             assert state is not None
             assert state.run_id == g.run_id
         assert get_run_state() is None
 
-    def test_nesting_reuses_outer_run_id(self):
+    def test_budget_guard_inside_client_run_uses_same_run_id(self):
         from actguard.core.run_context import get_run_state
 
-        with BudgetGuard(user_id="outer") as outer:
-            outer_run_id = outer.run_id
-            with BudgetGuard(user_id="inner") as inner:
-                assert inner.run_id == outer_run_id
-            # outer RunState still active after inner exits
+        client = actguard.Client()
+        with client.run(run_id="run-shared", user_id="outer"):
+            with client.budget_guard(usd_limit=1.0):
+                assert get_current_state() is not None
+                assert get_current_state().user_id == "outer"
+                assert get_run_state() is not None
+                assert get_run_state().run_id == "run-shared"
             assert get_run_state() is not None
-            assert get_run_state().run_id == outer_run_id
+            assert get_run_state().run_id == "run-shared"
         assert get_run_state() is None
 
 
@@ -191,12 +240,12 @@ class TestBudgetGuard:
 # ---------------------------------------------------------------------------
 
 class TestBudgetGuardAsync:
-    async def test_async_nesting(self):
-        async with BudgetGuard(user_id="outer") as outer:
-            async with BudgetGuard(user_id="inner") as inner:
-                assert get_current_state().user_id == "inner"
-            assert get_current_state().user_id == "outer"
-        assert get_current_state() is None
+    async def test_async_nested_budget_guard_raises_clear_error(self):
+        client = actguard.Client()
+        async with client.budget_guard(user_id="outer", usd_limit=1.0):
+            with pytest.raises(NestedBudgetGuardError):
+                async with client.budget_guard(user_id="inner", usd_limit=1.0):
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +286,7 @@ class TestOpenAIHelpers:
         from actguard.core.state import BudgetState
         from actguard.integrations.openai import _WrappedAsyncStream
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
+        state = BudgetState(user_id="u1", usd_limit=None)
         stream = _WrappedAsyncStream(_AsyncIter([_chunk(100, 50)]), "gpt-4o", state)
 
         first = await anext(stream)
@@ -260,7 +309,7 @@ class TestOpenAIIntegration:
         sync_mock.return_value = _resp(100, 50)
 
         client = openai.OpenAI(api_key="sk-test")
-        with BudgetGuard(user_id="u1") as guard:
+        with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
@@ -272,7 +321,7 @@ class TestOpenAIIntegration:
         async_mock.return_value = _resp(100, 50)
 
         client = openai.AsyncOpenAI(api_key="sk-test")
-        async with BudgetGuard(user_id="u1") as guard:
+        async with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             await client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
@@ -284,7 +333,7 @@ class TestOpenAIIntegration:
         sync_mock.return_value = iter([_chunk(content="a"), _chunk(100, 50)])
 
         client = openai.OpenAI(api_key="sk-test")
-        with BudgetGuard(user_id="u1") as guard:
+        with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             stream = client.chat.completions.create(
                 model="gpt-4o", messages=[], stream=True
             )
@@ -300,7 +349,7 @@ class TestOpenAIIntegration:
         async_mock.return_value = _AsyncIter([_chunk(content="a"), _chunk(100, 50)])
 
         client = openai.AsyncOpenAI(api_key="sk-test")
-        async with BudgetGuard(user_id="u1") as guard:
+        async with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             stream = await client.chat.completions.create(
                 model="gpt-4o", messages=[], stream=True
             )
@@ -310,16 +359,16 @@ class TestOpenAIIntegration:
         assert guard.tokens_used == 150
         assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
 
-    def test_token_limit_exceeded(self, openai_mocks):
+    def test_budget_limit_exceeded(self, openai_mocks):
         import openai
         sync_mock, _ = openai_mocks
         sync_mock.return_value = _resp(200, 0)
 
         client = openai.OpenAI(api_key="sk-test")
         with pytest.raises(BudgetExceededError) as exc_info:
-            with BudgetGuard(user_id="u1", token_limit=100):
+            with actguard.Client().budget_guard(user_id="u1", usd_limit=0.0001):
                 client.chat.completions.create(model="gpt-4o", messages=[])
-        assert exc_info.value.limit_type == "token"
+        assert exc_info.value.limit_type == "usd"
 
     def test_usd_limit_exceeded(self, openai_mocks):
         import openai
@@ -328,7 +377,7 @@ class TestOpenAIIntegration:
 
         client = openai.OpenAI(api_key="sk-test")
         with pytest.raises(BudgetExceededError) as exc_info:
-            with BudgetGuard(user_id="u1", usd_limit=1.0):
+            with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0):
                 client.chat.completions.create(model="gpt-4o", messages=[])
         assert exc_info.value.limit_type == "usd"
 
@@ -368,7 +417,7 @@ class TestAnthropicIntegration:
         sync_mock.return_value = self._resp(100, 50)
 
         client = anthropic.Anthropic(api_key="test")
-        with BudgetGuard(user_id="u1") as guard:
+        with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -385,7 +434,7 @@ class TestAnthropicIntegration:
         async_mock.return_value = self._resp(100, 50)
 
         client = anthropic.AsyncAnthropic(api_key="test")
-        async with BudgetGuard(user_id="u1") as guard:
+        async with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             await client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -402,7 +451,7 @@ class TestAnthropicIntegration:
         sync_mock.return_value = iter([self._event_start(100), self._event_delta(50)])
 
         client = anthropic.Anthropic(api_key="test")
-        with BudgetGuard(user_id="u1") as guard:
+        with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             stream = client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -424,7 +473,7 @@ class TestAnthropicIntegration:
         )
 
         client = anthropic.AsyncAnthropic(api_key="test")
-        async with BudgetGuard(user_id="u1") as guard:
+        async with actguard.Client().budget_guard(user_id="u1", usd_limit=1.0) as guard:
             stream = await client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -438,9 +487,9 @@ class TestAnthropicIntegration:
         assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
 
     def test_non_messages_endpoint_is_ignored(self, anthropic_mocks):
-        from anthropic._base_client import SyncAPIClient
         from anthropic._models import FinalRequestOptions
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from anthropic._base_client import SyncAPIClient
+        from actguard.core.state import BudgetState
 
         sync_mock, _ = anthropic_mocks
         sync_mock.return_value = self._resp(100, 50)
@@ -454,22 +503,19 @@ class TestAnthropicIntegration:
             _strict_response_validation=False,
         )
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             opts = FinalRequestOptions.construct(
                 method="post",
                 url="/v1/models",
                 json_data={"model": "claude-3-haiku-20240307"},
             )
             client.request(cast_to=object, options=opts)
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
 
-    def test_token_limit_exceeded(self, anthropic_mocks):
+    def test_budget_limit_exceeded(self, anthropic_mocks):
         import anthropic
 
         sync_mock, _ = anthropic_mocks
@@ -477,13 +523,13 @@ class TestAnthropicIntegration:
 
         client = anthropic.Anthropic(api_key="test")
         with pytest.raises(BudgetExceededError) as exc_info:
-            with BudgetGuard(user_id="u1", token_limit=100):
+            with actguard.Client().budget_guard(user_id="u1", usd_limit=0.00001):
                 client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=100,
                     messages=[{"role": "user", "content": "hi"}],
                 )
-        assert exc_info.value.limit_type == "token"
+        assert exc_info.value.limit_type == "usd"
 
     def test_usd_limit_exceeded(self, anthropic_mocks):
         import anthropic
@@ -493,7 +539,7 @@ class TestAnthropicIntegration:
 
         client = anthropic.Anthropic(api_key="test")
         with pytest.raises(BudgetExceededError) as exc_info:
-            with BudgetGuard(user_id="u1", usd_limit=0.1):
+            with actguard.Client().budget_guard(user_id="u1", usd_limit=0.1):
                 client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=100,
@@ -570,7 +616,7 @@ class TestGoogleGenAIPatch:
     _EXPECTED_COST = (100 * 0.10 + 50 * 0.40) / 1_000_000
 
     def test_sync_non_streaming_records_usage(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -583,18 +629,15 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 150
         assert state.usd_used == pytest.approx(self._EXPECTED_COST)
 
     async def test_async_non_streaming_records_usage(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -607,18 +650,15 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             await client.async_request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 150
         assert state.usd_used == pytest.approx(self._EXPECTED_COST)
 
     def test_sync_streaming_records_latest_usage_once(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -640,23 +680,20 @@ class TestGoogleGenAIPatch:
             ),
         ]
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             for _ in client.request_streamed(
                 "post",
                 "/v1beta/publishers/google/models/gemini-2.0-flash:streamGenerateContent",
                 {},
             ):
                 pass
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 150
         assert state.usd_used == pytest.approx(self._EXPECTED_COST)
 
     async def test_async_streaming_records_latest_usage_once(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -678,9 +715,8 @@ class TestGoogleGenAIPatch:
             ),
         ]
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             stream = await client.async_request_streamed(
                 "post",
                 "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
@@ -688,14 +724,12 @@ class TestGoogleGenAIPatch:
             )
             async for _ in stream:
                 pass
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 150
         assert state.usd_used == pytest.approx(self._EXPECTED_COST)
 
     def test_non_generate_endpoint_not_recorded(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -708,18 +742,15 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:countTokens", {})
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
 
     def test_missing_usage_does_not_record(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -727,18 +758,15 @@ class TestGoogleGenAIPatch:
         client = BaseApiClient()
         client.sync_result = SimpleNamespace(body=json.dumps({"no_usage": True}), headers={})
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
 
     def test_invalid_json_body_does_not_record(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -746,18 +774,15 @@ class TestGoogleGenAIPatch:
         client = BaseApiClient()
         client.sync_result = SimpleNamespace(body="{not-json", headers={})
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=None)
+        with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
 
-    def test_token_limit_exceeded(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+    def test_budget_limit_exceeded(self, google_genai_stubs):
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -770,18 +795,15 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", token_limit=100, usd_limit=None)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=0.00001)
+        with _with_runtime_budget_state(state):
             with pytest.raises(BudgetExceededError) as exc_info:
                 client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
-        assert exc_info.value.limit_type == "token"
+        assert exc_info.value.limit_type == "usd"
 
     def test_usd_limit_exceeded(self, google_genai_stubs):
-        from actguard.core.state import BudgetState, reset_state, set_state
+        from actguard.core.state import BudgetState
 
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -794,13 +816,10 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", token_limit=None, usd_limit=0.09)
-        token = set_state(state)
-        try:
+        state = BudgetState(user_id="u1", usd_limit=0.09)
+        with _with_runtime_budget_state(state):
             with pytest.raises(BudgetExceededError) as exc_info:
                 client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-        finally:
-            reset_state(token)
 
         assert exc_info.value.limit_type == "usd"
 

@@ -14,8 +14,9 @@ from actguard.exceptions import (
     ToolExecutionError,
     ToolTimeoutError,
 )
-from actguard.run_context import RunContext
 from actguard.tools.timeout import shutdown, timeout
+
+_CLIENT = actguard.Client()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -179,16 +180,16 @@ def test_async_generator_rejected_at_decoration():
 
 
 # ---------------------------------------------------------------------------
-# 10. run_id in exception inside RunContext
+# 10. run_id in exception inside client.run(...)
 # ---------------------------------------------------------------------------
 
 
-def test_run_id_in_exception_inside_run_context():
+def test_run_id_in_exception_inside_client_run():
     @timeout(0.05)
     def slow():
         time.sleep(10)
 
-    with RunContext(run_id="my-run-123"):
+    with _CLIENT.run(run_id="my-run-123"):
         with pytest.raises(ToolTimeoutError) as exc_info:
             slow()
 

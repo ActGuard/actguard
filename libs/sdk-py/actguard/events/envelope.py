@@ -37,8 +37,7 @@ class Envelope:
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
     )
     tenant_id: str = ""
-    agent_id: str = ""
-    user_id: str = ""
+    user_id: Optional[str] = None
     run_id: str = ""
     trace_id: str = ""
     span_id: str = ""
@@ -47,6 +46,11 @@ class Envelope:
     version: int = 1
     severity: str = ""
     outcome: str = ""
+    model: Optional[str] = None
+    usd_micros: Optional[int] = None
+    input_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
     digest: str = ""
     digest_algo: str = ""
     payload: Dict[str, Any] = field(default_factory=dict)
@@ -58,12 +62,10 @@ class Envelope:
         ts_str = self.ts.isoformat().replace("+00:00", "Z")
         ingested = self.ingested_at if self.ingested_at is not None else self.ts
         ingested_str = ingested.isoformat().replace("+00:00", "Z")
-        return {
+        payload = {
             "id": self.id,
             "ts": ts_str,
             "tenantID": self.tenant_id,
-            "agentID": self.agent_id,
-            "userID": self.user_id,
             "runID": self.run_id,
             "traceID": self.trace_id,
             "spanID": self.span_id,
@@ -79,6 +81,19 @@ class Envelope:
             "meta": self.meta,
             "ingestedAt": ingested_str,
         }
+        if self.user_id is not None:
+            payload["userID"] = self.user_id
+        if self.model:
+            payload["model"] = self.model
+        if self.usd_micros is not None:
+            payload["usd_micros"] = self.usd_micros
+        if self.input_tokens is not None:
+            payload["input_tokens"] = self.input_tokens
+        if self.cached_input_tokens is not None:
+            payload["cached_input_tokens"] = self.cached_input_tokens
+        if self.output_tokens is not None:
+            payload["output_tokens"] = self.output_tokens
+        return payload
 
 
 class EvidenceProvider:
@@ -98,13 +113,14 @@ class ActGuardContextEvidenceProvider:
             state = get_run_state()
             if state is None:
                 return []
+            attrs = {"run_id": state.run_id}
+            user_id = getattr(state, "user_id", None)
+            if user_id:
+                attrs["user_id"] = user_id
             ev = Evidence(
                 kind="run_context",
                 system="actguard",
-                attrs={
-                    "run_id": state.run_id,
-                    "user_id": getattr(state, "user_id", ""),
-                },
+                attrs=attrs,
             )
             return [ev]
         except Exception:

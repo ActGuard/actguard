@@ -2,6 +2,7 @@ import functools
 import inspect
 
 from ..core.run_context import require_run_state
+from ._observability import emit_guard_blocked
 
 
 def max_attempts(fn=None, *, calls: int):
@@ -21,9 +22,16 @@ def max_attempts(fn=None, *, calls: int):
             state._tool_attempts[tool_id] = state._tool_attempts.get(tool_id, 0) + 1
             used = state._tool_attempts[tool_id]
         if used > calls:
-            raise MaxAttemptsExceeded(
+            error = MaxAttemptsExceeded(
                 run_id=state.run_id, tool_name=tool_id, limit=calls, used=used
             )
+            emit_guard_blocked(
+                tool_id,
+                "max_attempts",
+                error,
+                extra={"limit": calls, "used": used},
+            )
+            raise error
 
     if inspect.iscoroutinefunction(fn):
 

@@ -145,6 +145,8 @@ This is context grounding in practice: anti-hallucination for tool arguments, en
 
 ## API Surface Used
 
+- `guard.Client.from_env()`
+- `client.run(...)`
 - `guard.session(...)`
 - `@guard.prove(...)`
 - `@guard.enforce(...)`

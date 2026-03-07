@@ -30,6 +30,14 @@ flowchart LR
 - `incident`: create incident (idempotent; duplicate call in `retry_duplicate`)
 - `notify`: notify on-call (rate-limited + max attempts)
 
+## Runtime scopes
+
+The script now uses:
+
+1. `client = actguard.Client.from_env()`
+2. `with client.run(...)` for runtime-scoped guards/reporting
+3. Optional `with client.budget_guard(usd_limit=...)` when `--usd_limit` is set
+
 ## Install
 
 ```bash
@@ -49,6 +57,14 @@ python main.py --mode dependency_down --no_llm
 python main.py --mode loop --no_llm
 python main.py --mode retry_duplicate --no_llm
 ```
+
+Optional budget scope (reserve/settle-backed):
+
+```bash
+python main.py --mode happy --no_llm --usd_limit 0.05
+```
+
+`client.budget_guard(...)` requires ActGuard gateway config (for reserve/settle), typically via `ACTGUARD_CONFIG`.
 
 ## Run with LLM
 

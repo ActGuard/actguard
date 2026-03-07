@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TypedDict
 
@@ -11,7 +12,8 @@ for candidate in (str(REPO_ROOT / "libs" / "sdk-py"), str(REPO_ROOT / "examples"
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-from actguard import BudgetGuard, RunContext, max_attempts
+import actguard
+from actguard import max_attempts
 from actguard.exceptions import (
     ActGuardError,
     CircuitOpenError,
@@ -158,7 +160,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticket_text")
     parser.add_argument("--mode", default="happy", choices=[m.value for m in Mode])
     parser.add_argument("--run_id")
-    parser.add_argument("--token_limit", type=int)
     parser.add_argument("--usd_limit", type=float)
     parser.add_argument("--no_llm", action="store_true")
     return parser.parse_args()
@@ -188,32 +189,40 @@ def main() -> int:
         "guards": [],
     }
 
-    with RunContext(run_id=args.run_id) as run:
-        with BudgetGuard(
-            user_id=args.user_id,
-            token_limit=args.token_limit,
-            usd_limit=args.usd_limit,
-        ) as budget:
-            final_state = app.invoke(initial_state)
+    client = actguard.Client.from_env()
+    try:
+        with client.run(user_id=args.user_id, run_id=args.run_id) as run:
+            budget_scope = (
+                client.budget_guard(usd_limit=args.usd_limit)
+                if args.usd_limit is not None
+                else nullcontext(None)
+            )
+            with budget_scope as budget:
+                final_state = app.invoke(initial_state)
 
-            result = {
-                "ticket_id": final_state["ticket_id"],
-                "urgent": final_state["urgent"],
-                "service": final_state["service"],
-                "status": final_state["status"],
-                "incident_id": final_state["incident_id"],
-                "notified": final_state["notified"],
-            }
+                result = {
+                    "ticket_id": final_state["ticket_id"],
+                    "urgent": final_state["urgent"],
+                    "service": final_state["service"],
+                    "status": final_state["status"],
+                    "incident_id": final_state["incident_id"],
+                    "notified": final_state["notified"],
+                }
 
-            print(f"Framework: langgraph | run_id={run.run_id}")
-            print(f"Result: {result}")
-            print("Guards:")
-            if final_state["guards"]:
-                for item in final_state["guards"]:
-                    print(f"- {item}")
-            else:
-                print("- none")
-            print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
+                print(f"Framework: langgraph | run_id={run.run_id}")
+                print(f"Result: {result}")
+                print("Guards:")
+                if final_state["guards"]:
+                    for item in final_state["guards"]:
+                        print(f"- {item}")
+                else:
+                    print("- none")
+                if budget is not None:
+                    print(f"Budget: tokens_used={budget.tokens_used} usd_used={budget.usd_used:.6f}")
+                else:
+                    print("Budget: skipped (set --usd_limit and ACTGUARD_CONFIG to enable)")
+    finally:
+        client.close()
 
     return 0
 

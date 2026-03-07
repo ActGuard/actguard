@@ -9,10 +9,9 @@ import logging
 import os
 import threading
 from concurrent.futures import Executor, ThreadPoolExecutor
-from datetime import datetime, timezone
 
-from .._gateway import report_event
 from ..exceptions import ToolTimeoutError
+from ._observability import emit_guard_intervention
 
 log = logging.getLogger(__name__)
 
@@ -54,17 +53,9 @@ def _get_run_id() -> str | None:
     from ..core.run_context import get_run_state
 
     state = get_run_state()
-    return state.run_id if state is not None else None
-
-
-def _report_timeout(tool_name: str) -> None:
-    report_event(
-        {
-            "type": "tool_timeout",
-            "tool_name": tool_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    if state is None:
+        return None
+    return state.run_id
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +99,11 @@ def timeout(seconds: float, executor: Executor | None = None):
                         seconds,
                         run_id,
                     )
-                    _report_timeout(tool_name)
+                    emit_guard_intervention(
+                        tool_name,
+                        "timeout",
+                        extra={"timeout_s": seconds},
+                    )
                     raise ToolTimeoutError(tool_name, seconds, run_id=run_id)
 
             return async_wrapper
@@ -138,7 +133,11 @@ def timeout(seconds: float, executor: Executor | None = None):
                         seconds,
                         run_id,
                     )
-                    _report_timeout(tool_name)
+                    emit_guard_intervention(
+                        tool_name,
+                        "timeout",
+                        extra={"timeout_s": seconds},
+                    )
                     raise ToolTimeoutError(tool_name, seconds, run_id=run_id)
 
             return sync_wrapper

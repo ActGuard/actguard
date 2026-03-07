@@ -1,12 +1,13 @@
 SIGNIFICANT: frozenset = frozenset({
     "budget.blocked",
     "budget.limit_exceeded",
+    "guard.blocked",
+    "guard.intervention",
     "guard.max_attempts_exceeded",
     "policy.blocked",
     "run.blocked",
     "run.failed",
-    "tool.blocked",
-    "tool.failed",
+    "tool.failure",
 })
 
 VERBOSE: frozenset = SIGNIFICANT | frozenset({

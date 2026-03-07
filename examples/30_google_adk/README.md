@@ -13,15 +13,16 @@ This example runs the same support-triage flow using Google ADK `SequentialAgent
 ## Execution order
 
 1. Parse CLI args
-2. Enter `RunContext`
-3. Enter `BudgetGuard`
-4. Run all 5 stages via ADK `SequentialAgent` (LLM mode) or directly (`--no_llm`):
+2. Build `client = actguard.Client.from_env()`
+3. Enter `client.run(...)`
+4. Optionally enter `client.budget_guard(usd_limit=...)` when `--usd_limit` is set
+5. Run all 5 stages via ADK `SequentialAgent` (LLM mode) or directly (`--no_llm`):
    - **SummarizeAgent** — classify ticket (service, urgency, severity)
    - **StatusAgent** — check service health
    - **DecisionAgent** — decide whether to create an incident
    - **IncidentAgent** — create incident if needed (idempotent)
    - **NotifyAgent** — notify on-call (rate-limit + max attempts)
-5. Print result, guard errors, budget totals
+6. Print result, guard errors, budget totals
 
 ## Install
 
@@ -39,6 +40,14 @@ python main.py --mode dependency_down --no_llm
 python main.py --mode loop --no_llm
 python main.py --mode retry_duplicate --no_llm
 ```
+
+Optional budget scope (reserve/settle-backed):
+
+```bash
+python main.py --mode happy --no_llm --usd_limit 0.05
+```
+
+`client.budget_guard(...)` requires ActGuard gateway config (for reserve/settle), typically via `ACTGUARD_CONFIG`.
 
 ## Run with LLM
 
