@@ -172,9 +172,6 @@ def main() -> int:
     ticket_id, ticket_text = get_ticket_text(args.ticket_id, args.ticket_text)
     app = build_graph()
 
-    import os
-    os.environ["OPENAI_API_KEY"] = "REMOVED_OPENAI_KEY_1"
-
     initial_state: GraphState = {
         "user_id": args.user_id,
         "ticket_id": ticket_id,
