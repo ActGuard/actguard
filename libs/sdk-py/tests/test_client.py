@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import actguard
+from actguard.core.budget_context import get_budget_state
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
+from actguard.exceptions import MissingRuntimeContextError, NestedRunContextError
 
 
 def test_client_from_file_creates_usable_client(tmp_path):
@@ -42,7 +46,7 @@ def test_client_run_without_user_id_is_supported():
         assert state.run_id == "run-no-user"
 
 
-def test_multiple_clients_do_not_leak_runtime_state():
+def test_nested_client_runs_raise_and_keep_outer_context():
     client_a = actguard.Client(api_key="key-a")
     client_b = actguard.Client(api_key="key-b")
 
@@ -51,11 +55,9 @@ def test_multiple_clients_do_not_leak_runtime_state():
         assert outer is not None
         assert outer.client is client_a
 
-        with client_b.run(run_id="inner"):
-            inner = get_run_state()
-            assert inner is not None
-            assert inner.client is client_b
-            assert inner.run_id == "inner"
+        with pytest.raises(NestedRunContextError):
+            with client_b.run(run_id="inner"):
+                pass
 
         restored = get_run_state()
         assert restored is not None
@@ -79,6 +81,17 @@ def test_sequential_runs_restore_context_correctly():
     with client.run(run_id="second"):
         assert get_run_state() is not None
         assert get_run_state().run_id == "second"
+
+    assert get_run_state() is None
+
+
+def test_run_context_clears_after_exception():
+    client = actguard.Client()
+
+    with pytest.raises(ValueError, match="boom"):
+        with client.run(run_id="run-error"):
+            assert get_run_state() is not None
+            raise ValueError("boom")
 
     assert get_run_state() is None
 
@@ -111,13 +124,23 @@ def test_reserve_budget_posts_expected_request_shape(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+    reserve_id = client.reserve_budget(
+        run_id="run-1",
+        usd_limit_micros=500_000,
+        plan_key="pro",
+        user_id="alice",
+    )
 
     assert reserve_id == "res-123"
     assert captured["url"] == "https://gw.example/api/v1/reserve"
     assert captured["auth"] == "Bearer sk-test"
     assert captured["content_type"] == "application/json"
-    assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
+    assert captured["payload"] == {
+        "run_id": "run-1",
+        "usd_limit_micros": 500_000,
+        "plan_key": "pro",
+        "user_id": "alice",
+    }
     assert captured["timeout"] == client.timeout_s
 
 
@@ -150,7 +173,6 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
 
     client.settle_budget(
         reserve_id="res-123",
-        run_id="run-1",
         provider="openai",
         provider_model_id="gpt-4o-mini",
         input_tokens=931,
@@ -162,7 +184,6 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
     assert captured["auth"] == "Bearer sk-test"
     assert captured["payload"] == {
         "reserve_id": "res-123",
-        "run_id": "run-1",
         "provider": "openai",
         "provider_model_id": "gpt-4o-mini",
         "input_tokens": 931,
@@ -172,26 +193,109 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
     assert captured["timeout"] == client.timeout_s
 
 
+def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
+    captured = {}
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=0,
+    )
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return b'{"reserve_id":"res-123"}'
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=None)
+
+    assert reserve_id == "res-123"
+    assert captured["payload"] == {"run_id": "run-1"}
+    assert captured["timeout"] == client.timeout_s
+
+
+def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
+    captured = {}
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=0,
+    )
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return b'{"reserve_id":"res-123"}'
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode())
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    reserve_id = client.reserve_budget(
+        run_id="run-1",
+        usd_limit_micros=500_000,
+        plan_key="",
+        user_id="",
+    )
+
+    assert reserve_id == "res-123"
+    assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
+    assert captured["timeout"] == client.timeout_s
+
+
 def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):
     client = actguard.Client()
     assert get_run_state() is None
+    assert get_budget_state() is None
     assert get_current_state() is None
 
     monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-guard")
     monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
-    with client.budget_guard(usd_limit=0.05) as guard:
-        run_state = get_run_state()
-        assert run_state is not None
-        assert run_state.client is client
-        assert run_state.budget_state is not None
-        assert run_state.budget_state.user_id is None
-        assert run_state.budget_state.reserve_id == "res-guard"
-        assert get_current_state() is run_state.budget_state
-        assert guard.run_id == run_state.run_id
+    with client.run(run_id="run-budget-state"):
+        with client.budget_guard(usd_limit=0.05, plan_key="pro") as guard:
+            run_state = get_run_state()
+            budget_state = get_budget_state()
+            assert run_state is not None
+            assert run_state.client is client
+            assert not hasattr(run_state, "budget_state")
+            assert budget_state is not None
+            assert budget_state.user_id is None
+            assert budget_state.reserve_id == "res-guard"
+            assert budget_state.plan_key == "pro"
+            assert get_current_state() is budget_state
+            assert guard.run_id == run_state.run_id
 
     assert get_run_state() is None
+    assert get_budget_state() is None
     assert get_current_state() is None
+
+
+def test_client_budget_guard_requires_active_run():
+    client = actguard.Client()
+
+    with pytest.raises(MissingRuntimeContextError):
+        with client.budget_guard(usd_limit=0.05):
+            pass
 
 
 def test_client_budget_guard_inside_run_reuses_existing_run(monkeypatch):
@@ -200,13 +304,18 @@ def test_client_budget_guard_inside_run_reuses_existing_run(monkeypatch):
     monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
     with client.run(run_id="run-existing", user_id="alice"):
+        assert get_budget_state() is None
         with client.budget_guard(usd_limit=0.1):
             run_state = get_run_state()
+            budget_state = get_budget_state()
             assert run_state is not None
             assert run_state.run_id == "run-existing"
             assert run_state.user_id == "alice"
-            assert run_state.budget_state is not None
-            assert run_state.budget_state.user_id == "alice"
+            assert not hasattr(run_state, "budget_state")
+            assert budget_state is not None
+            assert budget_state.user_id == "alice"
+        assert get_budget_state() is None
+        assert get_run_state() is run_state
 
 
 def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
@@ -224,25 +333,30 @@ def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
     monkeypatch.setattr(client, "reserve_budget", reserve)
     monkeypatch.setattr(client, "settle_budget", settle)
 
-    with client.budget_guard(usd_limit=0.1) as guard:
-        run_state = get_run_state()
-        assert run_state is not None
-        assert run_state.budget_reservation == {"reserve_id": "res_123"}
-        run_state.budget_state.provider = "openai"
-        run_state.budget_state.provider_model_id = "gpt-4o-mini"
-        run_state.budget_state.input_tokens = 11
-        run_state.budget_state.cached_input_tokens = 2
-        run_state.budget_state.output_tokens = 7
-        assert guard.run_id == run_state.run_id
+    with client.run(run_id="run-hooks"):
+        with client.budget_guard(usd_limit=0.1, plan_key="pro") as guard:
+            budget_state = get_budget_state()
+            assert budget_state is not None
+            assert budget_state.reserve_id == "res_123"
+            assert budget_state.plan_key == "pro"
+            budget_state.provider = "openai"
+            budget_state.provider_model_id = "gpt-4o-mini"
+            budget_state.input_tokens = 11
+            budget_state.cached_input_tokens = 2
+            budget_state.output_tokens = 7
+            assert guard.run_id == budget_state.run_id
 
     assert [name for name, _ in calls] == ["reserve", "settle"]
     assert calls[0][1]["usd_limit_micros"] == 100_000
+    assert calls[0][1]["plan_key"] == "pro"
+    assert calls[0][1]["user_id"] is None
     assert calls[1][1]["reserve_id"] == "res_123"
     assert calls[1][1]["provider"] == "openai"
     assert calls[1][1]["provider_model_id"] == "gpt-4o-mini"
     assert calls[1][1]["input_tokens"] == 11
     assert calls[1][1]["cached_input_tokens"] == 2
     assert calls[1][1]["output_tokens"] == 7
+    assert "run_id" not in calls[1][1]
 
 
 def test_budget_guard_no_leakage_between_clients(monkeypatch):
@@ -272,12 +386,31 @@ def test_budget_guard_no_leakage_between_clients(monkeypatch):
         lambda **kwargs: calls_b.append(("settle", kwargs)),
     )
 
-    with client_a.budget_guard(run_id="run-a", usd_limit=0.2):
-        pass
-    with client_b.budget_guard(run_id="run-b", usd_limit=0.3):
-        pass
+    with client_a.run(run_id="run-a"):
+        with client_a.budget_guard(run_id="run-a", usd_limit=0.2):
+            pass
+    with client_b.run(run_id="run-b"):
+        with client_b.budget_guard(run_id="run-b", usd_limit=0.3):
+            pass
 
     assert calls_a[0][1]["run_id"] == "run-a"
     assert calls_a[0][1]["usd_limit_micros"] == 200_000
     assert calls_b[0][1]["run_id"] == "run-b"
     assert calls_b[0][1]["usd_limit_micros"] == 300_000
+
+
+def test_client_close_waits_for_event_client_shutdown():
+    client = actguard.Client(gateway_url="https://gw.example", api_key="sk-test")
+    assert client.event_client is not None
+    seen = {}
+
+    class _Recorder:
+        def close(self, *, wait: bool) -> None:
+            seen["wait"] = wait
+
+    client._event_client = _Recorder()
+
+    client.close()
+
+    assert seen == {"wait": True}
+    assert client.event_client is None

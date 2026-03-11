@@ -5,7 +5,11 @@ import threading
 import pytest
 
 import actguard
-from actguard.exceptions import MaxAttemptsExceeded, MissingRuntimeContextError
+from actguard.exceptions import (
+    MaxAttemptsExceeded,
+    MissingRuntimeContextError,
+    NestedRunContextError,
+)
 from actguard.tools.max_attempts import max_attempts
 
 _CLIENT = actguard.Client()
@@ -415,21 +419,18 @@ def test_decorator_explicit_fn_argument():
 
 
 # ---------------------------------------------------------------------------
-# Nested client.run(...) — inner context is independent
+# Nested client.run(...) — rejected explicitly
 # ---------------------------------------------------------------------------
 
 
-def test_nested_runs_are_independent():
+def test_nested_runs_raise_and_outer_state_stays_active():
     fn = _make_fn(1)
 
     with _CLIENT.run():
         assert fn() == "ok"
-        with _CLIENT.run():
-            # Inner context has fresh state
-            assert fn() == "ok"
-            with pytest.raises(MaxAttemptsExceeded):
-                fn()
-        # Outer context is restored — still exhausted
+        with pytest.raises(NestedRunContextError):
+            with _CLIENT.run():
+                pass
         with pytest.raises(MaxAttemptsExceeded):
             fn()
 
@@ -444,6 +445,7 @@ def test_public_imports():
     assert hasattr(actguard, "max_attempts")
     assert hasattr(actguard, "MaxAttemptsExceeded")
     assert hasattr(actguard, "MissingRuntimeContextError")
+    assert hasattr(actguard, "NestedRunContextError")
 
 
 def test_max_attempts_exceeded_in_all():
@@ -456,6 +458,10 @@ def test_missing_runtime_context_error_in_all():
 
 def test_run_context_in_all():
     assert "RunContext" not in actguard.__all__
+
+
+def test_nested_run_context_error_in_all():
+    assert "NestedRunContextError" in actguard.__all__
 
 
 def test_max_attempts_in_all():

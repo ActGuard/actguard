@@ -5,6 +5,7 @@ import time
 import pytest
 
 import actguard
+from actguard.core.run_context import get_run_state
 from actguard.exceptions import (
     MaxAttemptsExceeded,
     MissingRuntimeContextError,
@@ -113,3 +114,16 @@ def test_missing_runtime_context_error_stays_clear():
         fn()
 
     assert "client.run" in str(exc_info.value)
+
+
+def test_tool_decorator_inherits_active_run_state():
+    client = actguard.Client()
+
+    @actguard.tool()
+    def fn():
+        state = get_run_state()
+        assert state is not None
+        return state.run_id, state.user_id
+
+    with client.run(run_id="run-tool", user_id="alice"):
+        assert fn() == ("run-tool", "alice")

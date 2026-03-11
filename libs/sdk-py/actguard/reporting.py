@@ -32,10 +32,12 @@ def emit_event(
     trace_id: str = "",
     span_id: str = "",
     model: Optional[str] = None,
+    provider: Optional[str] = None,
     usd_micros: Optional[int] = None,
     input_tokens: Optional[int] = None,
     cached_input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
+    tool_name: Optional[str] = None,
 ) -> None:
     """Emit a structured event to the ActGuard gateway."""
     client, config = _runtime_event_client_and_config()
@@ -60,21 +62,29 @@ def emit_event(
     if not run_id:
         return
 
+    payload = _with_runtime_metadata(payload)
+
     from actguard.events.envelope import Envelope
 
     (
         model,
+        provider,
         usd_micros,
         input_tokens,
         cached_input_tokens,
         output_tokens,
+        tool_name,
+        scope_fields,
+        plan_key,
     ) = _resolve_usage_fields(
         payload=payload,
         model=model,
+        provider=provider,
         usd_micros=usd_micros,
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
+        tool_name=tool_name,
     )
 
     envelope = Envelope(
@@ -87,14 +97,46 @@ def emit_event(
         severity=severity,
         outcome=outcome,
         model=model,
+        provider=provider,
         usd_micros=usd_micros,
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
+        scope_id=scope_fields["scope_id"],
+        scope_name=scope_fields["scope_name"],
+        scope_kind=scope_fields["scope_kind"],
+        parent_scope_id=scope_fields["parent_scope_id"],
+        root_scope_id=scope_fields["root_scope_id"],
+        plan_key=plan_key,
+        tool_name=tool_name,
         payload=payload,
         evidence=evidence or [],
     )
     client.enqueue(envelope)
+
+
+def emit_usage_event(
+    *,
+    provider: str,
+    model: str,
+    usd_micros: int,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    payload: Optional[dict] = None,
+) -> None:
+    emit_event(
+        "llm",
+        "usage",
+        payload or {},
+        provider=provider,
+        model=model,
+        usd_micros=usd_micros,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        outcome="success",
+    )
 
 
 def emit_violation(error: Exception, **context_overrides) -> None:
@@ -152,55 +194,20 @@ def emit_violation(error: Exception, **context_overrides) -> None:
     )
 
 
-def _emit_budget_check(state) -> None:
-    try:
-        emit_event("budget", "check", {
-            "user_id": state.user_id,
-            "tokens_used": state.tokens_used,
-            "usd_used": state.usd_used,
-        })
-    except Exception:
-        pass
-
-
-def _emit_budget_consumed(
-    state,
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cached_input_tokens: int = 0,
-) -> None:
-    try:
-        emit_event(
-            "budget",
-            "consumed",
-            {
-                "user_id": state.user_id,
-                "model": model,
-                "input_tokens": input_tokens,
-                "cached_input_tokens": cached_input_tokens,
-                "output_tokens": output_tokens,
-                "tokens_used": state.tokens_used,
-                "usd_used": state.usd_used,
-            },
-            model=model or None,
-            usd_micros=int(round((state.usd_used or 0.0) * 1_000_000)),
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_input_tokens,
-            output_tokens=output_tokens,
-        )
-    except Exception:
-        pass
-
-
 def _emit_budget_blocked(state) -> None:
     try:
-        emit_event("budget", "blocked", {
-            "user_id": state.user_id,
-            "tokens_used": state.tokens_used,
-            "usd_used": state.usd_used,
-            "usd_limit": state.usd_limit,
-        }, severity="error", outcome="blocked")
+        from actguard.core.budget_context import blocked_scope_metadata
+
+        emit_event(
+            "budget",
+            "blocked",
+            {
+                "user_id": state.user_id,
+                **blocked_scope_metadata(state),
+            },
+            severity="error",
+            outcome="blocked",
+        )
     except Exception:
         pass
 
@@ -233,15 +240,31 @@ def _resolve_usage_fields(
     *,
     payload: dict,
     model: Optional[str],
+    provider: Optional[str],
     usd_micros: Optional[int],
     input_tokens: Optional[int],
     cached_input_tokens: Optional[int],
     output_tokens: Optional[int],
-) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int], Optional[int]]:
+    tool_name: Optional[str],
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[str],
+    dict,
+    Optional[str],
+]:
     if not model:
         payload_model = payload.get("model")
         if isinstance(payload_model, str) and payload_model:
             model = payload_model
+    if not provider:
+        payload_provider = payload.get("provider")
+        if isinstance(payload_provider, str) and payload_provider:
+            provider = payload_provider
 
     if usd_micros is None:
         usd_micros = _optional_int(payload.get("usd_micros"))
@@ -251,8 +274,49 @@ def _resolve_usage_fields(
         cached_input_tokens = _optional_int(payload.get("cached_input_tokens"))
     if output_tokens is None:
         output_tokens = _optional_int(payload.get("output_tokens"))
+    if not tool_name:
+        payload_tool_name = payload.get("tool_name")
+        if isinstance(payload_tool_name, str) and payload_tool_name:
+            tool_name = payload_tool_name
 
-    return model, usd_micros, input_tokens, cached_input_tokens, output_tokens
+    scope_fields = {
+        "scope_id": _optional_str(payload.get("scope_id")),
+        "scope_name": _optional_str(payload.get("scope_name")),
+        "scope_kind": _optional_str(payload.get("scope_kind")),
+        "parent_scope_id": _optional_str(payload.get("parent_scope_id")),
+        "root_scope_id": _optional_str(payload.get("root_scope_id")),
+    }
+    plan_key = _optional_str(payload.get("plan_key"))
+
+    return (
+        model,
+        provider,
+        usd_micros,
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        tool_name,
+        scope_fields,
+        plan_key,
+    )
+
+
+def _with_runtime_metadata(payload: dict) -> dict:
+    try:
+        from actguard.core.budget_context import active_scope_metadata
+        from actguard.events.context import get_tool_name
+
+        enriched = dict(payload)
+        metadata = active_scope_metadata()
+        if metadata is not None:
+            for key, value in metadata.items():
+                enriched.setdefault(key, value)
+        tool_name = get_tool_name()
+        if tool_name:
+            enriched.setdefault("tool_name", tool_name)
+        return enriched
+    except Exception:
+        return payload
 
 
 def _optional_int(value: Any) -> Optional[int]:
@@ -262,3 +326,9 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return value

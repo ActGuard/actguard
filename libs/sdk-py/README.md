@@ -281,9 +281,14 @@ Outside `client.run(...)`, SDK event emission is a no-op.
 Per-invocation success noise (`tool.invoked`, `tool.succeeded`) is off by default.
 Set `ACTGUARD_EMIT_ALL_TOOL_RUNS=1` to opt in.
 
-When model/usage/cost data is known, emitted envelopes include normalized top-level
-fields (`model`, `usd_micros`, `input_tokens`, `cached_input_tokens`, `output_tokens`)
-in addition to any provider-specific payload details.
+When model/usage/cost data is known, emitted envelopes use a canonical snake_case
+shape and promote first-class reporting fields to the top level, including
+`provider`, `model`, `usd_micros`, `input_tokens`, `cached_input_tokens`,
+`output_tokens`, and scope attribution fields.
+
+Successful provider calls also emit one canonical attributed spend event:
+`llm.usage`. This event powers spend-by-scope/tool reporting and does not replace
+the deterministic reserve/settle ledger.
 
 ## SDK Compatibility
 
