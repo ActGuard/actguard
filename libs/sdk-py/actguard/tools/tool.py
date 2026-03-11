@@ -1,6 +1,8 @@
 import functools
 import inspect
 
+from actguard.events.context import reset_tool_name, set_tool_name
+
 from ._observability import emit_all_tool_runs_enabled, emit_tool_failure
 
 
@@ -66,47 +68,41 @@ def tool(
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def _async_wrap(*args, **kwargs):
-            if emit_all_tool_runs_enabled():
-                _emit_tool_invoked(tool_qname)
+            tool_token = set_tool_name(tool_qname)
             try:
                 result = await wrapped(*args, **kwargs)
                 if emit_all_tool_runs_enabled():
-                    _emit_tool_succeeded(tool_qname)
+                    _emit_tool_invoke(tool_qname)
                 return result
             except Exception as exc:
                 _emit_tool_error(tool_qname, exc)
                 raise
+            finally:
+                reset_tool_name(tool_token)
 
         return _async_wrap
 
     @functools.wraps(fn)
     def _sync_wrap(*args, **kwargs):
-        if emit_all_tool_runs_enabled():
-            _emit_tool_invoked(tool_qname)
+        tool_token = set_tool_name(tool_qname)
         try:
             result = wrapped(*args, **kwargs)
             if emit_all_tool_runs_enabled():
-                _emit_tool_succeeded(tool_qname)
+                _emit_tool_invoke(tool_qname)
             return result
         except Exception as exc:
             _emit_tool_error(tool_qname, exc)
             raise
+        finally:
+            reset_tool_name(tool_token)
 
     return _sync_wrap
 
 
-def _emit_tool_invoked(tool_name: str) -> None:
+def _emit_tool_invoke(tool_name: str) -> None:
     try:
         from actguard.reporting import emit_event
-        emit_event("tool", "invoked", {"tool_name": tool_name})
-    except Exception:
-        pass
-
-
-def _emit_tool_succeeded(tool_name: str) -> None:
-    try:
-        from actguard.reporting import emit_event
-        emit_event("tool", "succeeded", {"tool_name": tool_name}, outcome="success")
+        emit_event("tool", "invoke", {"tool_name": tool_name}, outcome="success")
     except Exception:
         pass
 

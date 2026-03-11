@@ -70,7 +70,7 @@ def test_tool_failure_reporting_does_not_mask_primary_exception(monkeypatch):
         boom()
 
 
-def test_tool_invoked_and_succeeded_not_emitted_by_default(
+def test_tool_invoke_not_emitted_by_default(
     client, emitted_events, monkeypatch
 ):
     monkeypatch.delenv("ACTGUARD_EMIT_ALL_TOOL_RUNS", raising=False)
@@ -82,11 +82,10 @@ def test_tool_invoked_and_succeeded_not_emitted_by_default(
     with client.run(run_id="run-default"):
         assert ok() == "ok"
 
-    assert _find_events(emitted_events, category="tool", name="invoked") == []
-    assert _find_events(emitted_events, category="tool", name="succeeded") == []
+    assert _find_events(emitted_events, category="tool", name="invoke") == []
 
 
-def test_tool_invoked_and_succeeded_emit_when_opted_in(
+def test_tool_invoke_emits_once_when_opted_in(
     client, emitted_events, monkeypatch
 ):
     monkeypatch.setenv("ACTGUARD_EMIT_ALL_TOOL_RUNS", "1")
@@ -98,8 +97,9 @@ def test_tool_invoked_and_succeeded_emit_when_opted_in(
     with client.run(run_id="run-opt-in"):
         assert ok() == "ok"
 
-    assert len(_find_events(emitted_events, category="tool", name="invoked")) == 1
-    assert len(_find_events(emitted_events, category="tool", name="succeeded")) == 1
+    matches = _find_events(emitted_events, category="tool", name="invoke")
+    assert len(matches) == 1
+    assert matches[0].outcome == "success"
 
 
 def test_max_attempts_emits_guard_blocked_with_optional_user_id(client, emitted_events):
@@ -118,7 +118,7 @@ def test_max_attempts_emits_guard_blocked_with_optional_user_id(client, emitted_
     event = matches[0]
     assert event.run_id == "run-max-attempts"
     assert event.user_id is None
-    assert "userID" not in event.to_dict()
+    assert "user_id" not in event.to_dict()
     assert event.payload["limit"] == 1
     assert event.payload["used"] == 2
 

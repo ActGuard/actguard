@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from actguard._config import ActGuardConfig
-from actguard.core.run_context import RunState, reset_run_state, set_run_state
+from actguard.core.run_context import (
+    RunState,
+    get_run_state,
+    reset_run_state,
+    set_run_state,
+)
 from actguard.events.client import EventClient
 
 
@@ -34,6 +39,16 @@ class _ClientRunContext:
         self._token: Optional[Token] = None
 
     def __enter__(self) -> "_ClientRunContext":
+        from actguard.exceptions import NestedRunContextError
+
+        active = get_run_state()
+        if active is not None:
+            raise NestedRunContextError(
+                "Nested runtime contexts are not supported. "
+                f"Active run_id={active.run_id!r}; finish the current client.run(...) "
+                "before entering another."
+            )
+
         self._state = RunState(
             client=self.client,
             run_id=self.run_id,
@@ -45,30 +60,30 @@ class _ClientRunContext:
 
             emit_event(
                 "run",
-                "started",
+                "start",
                 {
-                    "run_id": self.run_id,
-                    "user_id": self.user_id,
+                    "run_id": self._state.run_id,
+                    "user_id": self._state.user_id,
                 },
-                run_id=self.run_id,
-                user_id=self.user_id,
             )
         except Exception:
             pass
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        run_id = self.run_id
+        if self._state is not None:
+            run_id = self._state.run_id
+
         try:
             from actguard.reporting import emit_event
 
             if exc_type is None:
                 emit_event(
                     "run",
-                    "completed",
-                    {"run_id": self.run_id},
-                    outcome="completed",
-                    run_id=self.run_id,
-                    user_id=self.user_id,
+                    "end",
+                    {"run_id": run_id},
+                    outcome="success",
                 )
             else:
                 from actguard.exceptions import ActGuardViolation
@@ -76,22 +91,18 @@ class _ClientRunContext:
                 if issubclass(exc_type, ActGuardViolation):
                     emit_event(
                         "run",
-                        "blocked",
-                        {"run_id": self.run_id, "error_type": exc_type.__name__},
+                        "end",
+                        {"run_id": run_id, "error_type": exc_type.__name__},
                         severity="error",
                         outcome="blocked",
-                        run_id=self.run_id,
-                        user_id=self.user_id,
                     )
                 else:
                     emit_event(
                         "run",
-                        "failed",
-                        {"run_id": self.run_id, "error_type": exc_type.__name__},
+                        "end",
+                        {"run_id": run_id, "error_type": exc_type.__name__},
                         severity="error",
                         outcome="failed",
-                        run_id=self.run_id,
-                        user_id=self.user_id,
                     )
         except Exception:
             pass
@@ -99,6 +110,7 @@ class _ClientRunContext:
         if self._token is not None:
             reset_run_state(self._token)
             self._token = None
+        self._state = None
 
     async def __aenter__(self) -> "_ClientRunContext":
         return self.__enter__()
@@ -178,16 +190,20 @@ class Client:
         self,
         *,
         user_id: Optional[str] = None,
-        usd_limit: float,
+        name: Optional[str] = None,
+        usd_limit: Optional[float] = None,
         run_id: Optional[str] = None,
+        plan_key: Optional[str] = None,
     ):
         from actguard.budget import BudgetGuard
 
         return BudgetGuard(
             client=self,
             user_id=user_id,
+            name=name,
             usd_limit=usd_limit,
             run_id=run_id,
+            plan_key=plan_key,
         )
 
     def _post_budget_api(self, *, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -223,7 +239,7 @@ class Client:
                 return {}
             except urllib.error.HTTPError as exc:
                 status = exc.code
-                if status in (400, 401, 403):
+                if status in (400, 401, 403, 422):
                     raise BudgetTransportError(
                         f"Budget API request failed with status {status} at {path}."
                     ) from exc
@@ -246,14 +262,21 @@ class Client:
         self,
         *,
         run_id: str,
-        usd_limit_micros: int,
+        usd_limit_micros: Optional[int],
+        plan_key: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> str:
         from actguard.exceptions import BudgetTransportError
 
         payload = {
             "run_id": run_id,
-            "usd_limit_micros": usd_limit_micros,
         }
+        if usd_limit_micros is not None:
+            payload["usd_limit_micros"] = usd_limit_micros
+        if plan_key:
+            payload["plan_key"] = plan_key
+        if user_id:
+            payload["user_id"] = user_id
         response = self._post_budget_api(path="/api/v1/reserve", payload=payload)
         reserve_id = response.get("reserve_id")
         if not isinstance(reserve_id, str) or not reserve_id:
@@ -264,7 +287,6 @@ class Client:
         self,
         *,
         reserve_id: str,
-        run_id: str,
         provider: str,
         provider_model_id: str,
         input_tokens: int,
@@ -273,7 +295,6 @@ class Client:
     ) -> None:
         payload = {
             "reserve_id": reserve_id,
-            "run_id": run_id,
             "provider": provider,
             "provider_model_id": provider_model_id,
             "input_tokens": input_tokens,
@@ -286,7 +307,9 @@ class Client:
         if self._event_client is None:
             return
         try:
-            self._event_client.close(wait=False)
+            # Shutdown should drain the queue so terminal events like run.end
+            # are not lost when callers close the client before process exit.
+            self._event_client.close(wait=True)
         finally:
             self._event_client = None
 

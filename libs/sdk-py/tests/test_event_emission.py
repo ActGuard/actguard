@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 import actguard
-from actguard.exceptions import BudgetExceededError, NestedBudgetGuardError
+import actguard.integrations.openai as _oai_mod
+from actguard.events.envelope import ActGuardContextEvidenceProvider
+from actguard.exceptions import BudgetExceededError
 
 
 @pytest.fixture()
@@ -40,7 +43,26 @@ def stub_budget_transport(client, monkeypatch):
     monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
 
-def test_budget_exceeded_emits_violation_event(client, emitted_events, stub_budget_transport):
+@pytest.fixture()
+def openai_usage_mock():
+    from openai._base_client import SyncAPIClient
+
+    orig_request = SyncAPIClient.request
+    orig_patched = _oai_mod._patched
+
+    sync_mock = MagicMock()
+    SyncAPIClient.request = sync_mock
+    _oai_mod._patched = False
+
+    yield sync_mock
+
+    SyncAPIClient.request = orig_request
+    _oai_mod._patched = orig_patched
+
+
+def test_budget_exceeded_emits_violation_event(
+    client, emitted_events, stub_budget_transport
+):
     error = BudgetExceededError(
         user_id="alice",
         tokens_used=1000,
@@ -72,16 +94,15 @@ def test_budget_exceeded_emits_violation_event(client, emitted_events, stub_budg
 def test_budget_guard_events_include_run_id(client, emitted_events, stub_budget_transport):
     with client.run(user_id="alice", run_id="run-ctx"):
         with client.budget_guard(user_id="alice", usd_limit=0.05) as guard:
-            actguard.emit_event("budget", "check", {})
+            actguard.emit_event("tool", "invoke", {})
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "check"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert len(matches) == 1
     envelope = matches[0]
-    assert envelope.run_id
     assert envelope.run_id == "run-ctx"
     assert guard.run_id == envelope.run_id
 
@@ -89,27 +110,49 @@ def test_budget_guard_events_include_run_id(client, emitted_events, stub_budget_
 def test_budget_lifecycle_events_are_not_emitted_by_sdk(
     client, emitted_events, stub_budget_transport
 ):
-    with client.budget_guard(run_id="budget-lifecycle", usd_limit=0.05):
-        pass
+    with client.run(run_id="budget-lifecycle"):
+        with client.budget_guard(run_id="budget-lifecycle", usd_limit=0.05):
+            pass
 
     lifecycle = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name in {"reserved", "settled"}
+        if env.category == "budget" and env.name in {"released", "reserved", "settled"}
     ]
     assert lifecycle == []
 
 
-def test_nested_budget_guards_fail_clearly(client, stub_budget_transport):
+def test_nested_budget_events_include_top_level_scope_metadata(
+    client, emitted_events, stub_budget_transport
+):
     with client.run(run_id="run-shared"):
-        with client.budget_guard(user_id="outer", usd_limit=0.2):
-            with pytest.raises(NestedBudgetGuardError):
-                with client.budget_guard(user_id="inner", usd_limit=0.1):
-                    pass
+        with client.budget_guard(user_id="outer", usd_limit=0.2, plan_key="pro"):
+            with client.budget_guard(name="search_tool", usd_limit=0.1):
+                actguard.emit_event("tool", "invoke", {"tool_name": "search"})
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "tool" and env.name == "invoke"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    wire = envelope.to_dict()
+    assert envelope.scope_kind == "nested"
+    assert envelope.scope_name == "search_tool"
+    assert envelope.scope_id
+    assert envelope.parent_scope_id
+    assert envelope.root_scope_id
+    assert wire["scope_kind"] == "nested"
+    assert wire["scope_name"] == "search_tool"
+    assert wire["scope_id"] == envelope.scope_id
+    assert wire["parent_scope_id"] == envelope.parent_scope_id
+    assert wire["root_scope_id"] == envelope.root_scope_id
+    assert envelope.plan_key == "pro"
+    assert wire["plan_key"] == "pro"
 
 
 def test_emit_violation_no_op_without_config():
-    # No active client/run context means emit_violation is a no-op.
     error = BudgetExceededError(
         user_id="alice",
         tokens_used=100,
@@ -117,56 +160,72 @@ def test_emit_violation_no_op_without_config():
         usd_limit=None,
         limit_type="usd",
     )
-    actguard.emit_violation(error)  # must not raise
+    actguard.emit_violation(error)
 
 
 def test_user_id_none_stays_none_in_emitted_envelope(client, emitted_events):
     with client.run(run_id="run-none-user"):
-        actguard.emit_event("budget", "check", {})
+        actguard.emit_event("tool", "invoke", {})
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "check"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert len(matches) == 1
     envelope = matches[0]
     assert envelope.user_id is None
-    assert "userID" not in envelope.to_dict()
+    assert "user_id" not in envelope.to_dict()
+
+
+def test_context_evidence_provider_reads_active_run_state(client):
+    with client.run(run_id="run-evidence", user_id="alice"):
+        evidence = ActGuardContextEvidenceProvider().current()
+
+    assert len(evidence) == 1
+    assert evidence[0].attrs == {"run_id": "run-evidence", "user_id": "alice"}
 
 
 def test_emit_event_populates_top_level_usage_fields(client, emitted_events):
     with client.run(run_id="run-usage-fields", user_id="alice"):
         actguard.emit_event(
-            "budget",
-            "consumed",
+            "tool",
+            "invoke",
             {
                 "model": "payload-model",
                 "input_tokens": 1,
                 "cached_input_tokens": 2,
                 "output_tokens": 3,
+                "provider": "payload-provider",
+                "tool_name": "payload-tool",
             },
+            provider="openai",
             model="gpt-4o-mini",
             usd_micros=420_000,
             input_tokens=931,
             cached_input_tokens=7,
             output_tokens=30,
+            tool_name="top-level-tool",
         )
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "consumed"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert len(matches) == 1
     envelope = matches[0]
     wire = envelope.to_dict()
     assert envelope.model == "gpt-4o-mini"
+    assert envelope.provider == "openai"
+    assert envelope.tool_name == "top-level-tool"
     assert envelope.usd_micros == 420_000
     assert envelope.input_tokens == 931
     assert envelope.cached_input_tokens == 7
     assert envelope.output_tokens == 30
     assert wire["model"] == "gpt-4o-mini"
+    assert wire["provider"] == "openai"
+    assert wire["tool_name"] == "top-level-tool"
     assert wire["usd_micros"] == 420_000
     assert wire["input_tokens"] == 931
     assert wire["cached_input_tokens"] == 7
@@ -175,95 +234,92 @@ def test_emit_event_populates_top_level_usage_fields(client, emitted_events):
     assert envelope.payload["cached_input_tokens"] == 2
 
 
+def test_emit_event_uses_snake_case_wire_keys(client, emitted_events):
+    with client.run(run_id="run-wire-shape", user_id="alice"):
+        actguard.emit_event("tool", "invoke", {})
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "tool" and env.name == "invoke"
+    ]
+    assert len(matches) == 1
+    wire = matches[0].to_dict()
+    assert "run_id" in wire
+    assert "user_id" in wire
+    assert "tenant_id" in wire
+    assert "ingested_at" in wire
+    assert "digest_algo" in wire
+    assert "runID" not in wire
+    assert "userID" not in wire
+    assert "tenantID" not in wire
+    assert "ingestedAt" not in wire
+    assert "digestAlgo" not in wire
+
+
 def test_emit_event_promotes_usage_fields_from_payload(client, emitted_events):
     with client.run(run_id="run-usage-from-payload"):
         actguard.emit_event(
-            "budget",
-            "consumed",
+            "tool",
+            "invoke",
             {
                 "model": "gpt-4o-mini",
+                "provider": "openai",
                 "usd_micros": 123_456,
                 "input_tokens": 22,
                 "cached_input_tokens": 4,
                 "output_tokens": 6,
+                "tool_name": "search",
             },
         )
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "consumed"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert len(matches) == 1
     envelope = matches[0]
     wire = envelope.to_dict()
     assert envelope.model == "gpt-4o-mini"
+    assert envelope.provider == "openai"
+    assert envelope.tool_name == "search"
     assert envelope.usd_micros == 123_456
     assert envelope.input_tokens == 22
     assert envelope.cached_input_tokens == 4
     assert envelope.output_tokens == 6
     assert wire["model"] == "gpt-4o-mini"
+    assert wire["provider"] == "openai"
+    assert wire["tool_name"] == "search"
     assert wire["usd_micros"] == 123_456
-    assert wire["input_tokens"] == 22
-    assert wire["cached_input_tokens"] == 4
-    assert wire["output_tokens"] == 6
 
 
 def test_emit_event_omits_top_level_usage_fields_when_unknown(client, emitted_events):
     with client.run(run_id="run-usage-unknown"):
-        actguard.emit_event("budget", "check", {"tokens_used": 0})
+        actguard.emit_event("tool", "invoke", {"tokens_used": 0})
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "check"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert len(matches) == 1
     wire = matches[0].to_dict()
     assert "model" not in wire
+    assert "provider" not in wire
     assert "usd_micros" not in wire
     assert "input_tokens" not in wire
     assert "cached_input_tokens" not in wire
     assert "output_tokens" not in wire
 
 
-def test_budget_consumed_helper_sets_top_level_cached_input_tokens(client, emitted_events):
-    from actguard.reporting import _emit_budget_consumed
-
-    state = SimpleNamespace(
-        user_id="alice",
-        tokens_used=12,
-        usd_used=0.000321,
-    )
-    with client.run(run_id="run-budget-consumed"):
-        _emit_budget_consumed(
-            state,
-            model="gpt-4o-mini",
-            input_tokens=9,
-            output_tokens=3,
-            cached_input_tokens=2,
-        )
-
-    matches = [
-        env
-        for env in emitted_events
-        if env.category == "budget" and env.name == "consumed"
-    ]
-    assert len(matches) == 1
-    envelope = matches[0]
-    wire = envelope.to_dict()
-    assert envelope.cached_input_tokens == 2
-    assert wire["cached_input_tokens"] == 2
-    assert wire["usd_micros"] == 321
-
-
 def test_no_event_emission_without_active_runtime_context(client, emitted_events):
-    actguard.emit_event("budget", "check", {})
+    actguard.emit_event("tool", "invoke", {})
 
     matches = [
         env
         for env in emitted_events
-        if env.category == "budget" and env.name == "check"
+        if env.category == "tool" and env.name == "invoke"
     ]
     assert matches == []
 
@@ -289,12 +345,12 @@ def test_no_event_leakage_between_multiple_clients(monkeypatch):
     )
 
     with client_a.run(run_id="run-a"):
-        actguard.emit_event("budget", "check", {})
+        actguard.emit_event("tool", "invoke", {})
     with client_b.run(run_id="run-b"):
-        actguard.emit_event("budget", "check", {})
+        actguard.emit_event("tool", "invoke", {})
 
-    a_budget = [e for e in events_a if e.category == "budget" and e.name == "check"]
-    b_budget = [e for e in events_b if e.category == "budget" and e.name == "check"]
+    a_budget = [e for e in events_a if e.category == "tool" and e.name == "invoke"]
+    b_budget = [e for e in events_b if e.category == "tool" and e.name == "invoke"]
     assert len(a_budget) == 1
     assert len(b_budget) == 1
     assert a_budget[0].run_id == "run-a"
@@ -302,3 +358,112 @@ def test_no_event_leakage_between_multiple_clients(monkeypatch):
 
     client_a.close()
     client_b.close()
+
+
+def test_openai_provider_call_emits_one_llm_usage_event(
+    client,
+    emitted_events,
+    stub_budget_transport,
+    openai_usage_mock,
+):
+    import openai
+
+    openai_usage_mock.return_value = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50)
+    )
+    model_client = openai.OpenAI(api_key="sk-test")
+
+    @actguard.tool()
+    def call_model():
+        return model_client.chat.completions.create(model="gpt-4o", messages=[])
+
+    with client.run(run_id="run-llm-usage", user_id="alice"):
+        with client.budget_guard(name="search_tool", usd_limit=1.0):
+            call_model()
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    wire = envelope.to_dict()
+    assert envelope.provider == "openai"
+    assert envelope.model == "gpt-4o"
+    assert envelope.scope_name == "search_tool"
+    assert envelope.tool_name
+    assert envelope.input_tokens == 100
+    assert envelope.output_tokens == 50
+    assert envelope.usd_micros == 750
+    assert wire["provider"] == "openai"
+    assert wire["scope_name"] == "search_tool"
+    assert wire["tool_name"] == envelope.tool_name
+
+
+def test_only_llm_usage_event_is_eligible_for_attributed_spend(client, emitted_events):
+    from actguard.reporting_contract import is_attributed_spend_event
+
+    with client.run(run_id="run-contract"):
+        actguard.emit_event("tool", "invoke", {"usd_micros": 123})
+        actguard.emit_event("llm", "usage", {}, provider="openai", usd_micros=456)
+
+    matches = [
+        env
+        for env in emitted_events
+        if is_attributed_spend_event(
+            category=env.category,
+            name=env.name,
+            usd_micros=env.usd_micros,
+        )
+    ]
+    assert len(matches) == 1
+    assert matches[0].category == "llm"
+    assert matches[0].name == "usage"
+
+
+def test_run_success_emits_start_and_end_success(client, emitted_events):
+    with client.run(run_id="run-success", user_id="alice"):
+        pass
+
+    starts = [e for e in emitted_events if e.category == "run" and e.name == "start"]
+    ends = [e for e in emitted_events if e.category == "run" and e.name == "end"]
+    assert len(starts) == 1
+    assert len(ends) == 1
+    assert starts[0].run_id == "run-success"
+    assert ends[0].run_id == "run-success"
+    assert ends[0].outcome == "success"
+
+
+def test_run_blocked_emits_end_blocked(client, emitted_events):
+    violation = BudgetExceededError(
+        user_id="alice",
+        tokens_used=1000,
+        usd_used=0.05,
+        usd_limit=None,
+        limit_type="usd",
+    )
+
+    with pytest.raises(BudgetExceededError):
+        with client.run(run_id="run-blocked", user_id="alice"):
+            raise violation
+
+    starts = [e for e in emitted_events if e.category == "run" and e.name == "start"]
+    ends = [e for e in emitted_events if e.category == "run" and e.name == "end"]
+    assert len(starts) == 1
+    assert len(ends) == 1
+    assert ends[0].outcome == "blocked"
+    assert ends[0].payload["error_type"] == "BudgetExceededError"
+
+
+def test_run_failed_emits_end_failed(client, emitted_events):
+    with pytest.raises(RuntimeError, match="boom"):
+        with client.run(run_id="run-failed"):
+            raise RuntimeError("boom")
+
+    starts = [e for e in emitted_events if e.category == "run" and e.name == "start"]
+    ends = [e for e in emitted_events if e.category == "run" and e.name == "end"]
+    assert len(starts) == 1
+    assert len(ends) == 1
+    assert ends[0].outcome == "failed"
+    assert ends[0].payload["error_type"] == "RuntimeError"

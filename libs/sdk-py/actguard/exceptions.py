@@ -69,6 +69,17 @@ class MissingRuntimeContextError(ToolGuardError):
         super().__init__(message or default)
 
 
+class NestedRunContextError(ToolGuardError):
+    """Raised when client.run() is entered while another run is already active."""
+
+    def __init__(self, message: str = "") -> None:
+        default = (
+            "Nested runtime contexts are not supported. "
+            "Use one active client.run(...) root execution context at a time."
+        )
+        super().__init__(message or default)
+
+
 class NestedBudgetGuardError(ToolGuardError):
     """Raised when budget_guard is entered while another budget scope is active."""
 
@@ -76,6 +87,17 @@ class NestedBudgetGuardError(ToolGuardError):
         default = (
             "Nested budget scopes are not supported. "
             "Use one active client.budget_guard(...) per run."
+        )
+        super().__init__(message or default)
+
+
+class BudgetConfigurationError(ToolGuardError):
+    """Raised when a path tries to redefine the shared root budget configuration."""
+
+    def __init__(self, message: str = "") -> None:
+        default = (
+            "budget_guard configuration does not match the active root scope. "
+            "The first root definition wins for the run."
         )
         super().__init__(message or default)
 
@@ -220,12 +242,22 @@ class BudgetExceededError(ActGuardViolation):
         usd_used: float,
         usd_limit: Optional[float],
         limit_type: Literal["usd"],
+        scope_id: Optional[str] = None,
+        scope_name: Optional[str] = None,
+        scope_kind: Optional[str] = None,
+        parent_scope_id: Optional[str] = None,
+        root_scope_id: Optional[str] = None,
     ) -> None:
         self.user_id = user_id
         self.tokens_used = tokens_used
         self.usd_used = usd_used
         self.usd_limit = usd_limit
         self.limit_type = limit_type
+        self.scope_id = scope_id
+        self.scope_name = scope_name
+        self.scope_kind = scope_kind
+        self.parent_scope_id = parent_scope_id
+        self.root_scope_id = root_scope_id
 
         user_label = user_id if user_id is not None else "<unknown>"
         limit_label = (
@@ -244,4 +276,9 @@ class BudgetExceededError(ActGuardViolation):
             "usd_used": self.usd_used,
             "usd_limit": self.usd_limit,
             "limit_type": self.limit_type,
+            "scope_id": self.scope_id,
+            "scope_name": self.scope_name,
+            "scope_kind": self.scope_kind,
+            "parent_scope_id": self.parent_scope_id,
+            "root_scope_id": self.root_scope_id,
         }
