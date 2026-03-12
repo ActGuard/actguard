@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping, Optional
 
+from actguard._monitoring import warn_monitoring_issue
+
 _MAX_ERROR_MESSAGE_LEN = 256
 
 
@@ -75,5 +77,10 @@ def _emit(category: str, name: str, payload: dict, **kwargs) -> None:
         from actguard.reporting import emit_event
 
         emit_event(category, name, payload, **kwargs)
-    except Exception:
-        pass
+    except Exception as exc:
+        warn_monitoring_issue(
+            subsystem="reporting",
+            operation=f"{category}.{name}",
+            exc=exc,
+            stacklevel=2,
+        )

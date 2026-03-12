@@ -1,3 +1,3 @@
-from .manager import patch_all
+from .manager import ensure_patched, patch_all
 
-__all__ = ["patch_all"]
+__all__ = ["ensure_patched", "patch_all"]

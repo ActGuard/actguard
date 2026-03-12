@@ -2,7 +2,13 @@ import importlib.util
 import re
 from typing import Iterator
 
-from actguard.core.budget_context import add_cost, check_budget_limits, get_budget_state, record_usage
+from actguard.budget_events import emit_budget_blocked
+from actguard.core.budget_context import (
+    add_cost,
+    check_budget_limits,
+    get_budget_state,
+    record_usage,
+)
 from actguard.core.pricing import get_cost
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
@@ -64,9 +70,7 @@ def _record_usage(
 def _check_limits(state) -> None:
     if get_budget_state() is None:
         if state.usd_limit is not None and state.usd_used >= state.usd_limit:
-            from actguard.reporting import _emit_budget_blocked
-
-            _emit_budget_blocked(state)
+            emit_budget_blocked(state)
             raise BudgetExceededError(
                 user_id=state.user_id,
                 tokens_used=state.tokens_used,
@@ -82,10 +86,8 @@ def _check_limits(state) -> None:
         return
     violation = check_budget_limits()
     if violation is not None:
-        from actguard.reporting import _emit_budget_blocked
-
         blocked_scope = violation.blocked_scope
-        _emit_budget_blocked(blocked_scope)
+        emit_budget_blocked(blocked_scope)
         raise BudgetExceededError(
             user_id=blocked_scope.user_id,
             tokens_used=blocked_scope.tokens_used,
@@ -101,9 +103,8 @@ def _check_limits(state) -> None:
 
 
 def _get_cached_input_tokens(usage) -> int:
-    details = (
-        getattr(usage, "prompt_tokens_details", None)
-        or getattr(usage, "input_tokens_details", None)
+    details = getattr(usage, "prompt_tokens_details", None) or getattr(
+        usage, "input_tokens_details", None
     )
     if details is None:
         return 0
@@ -115,14 +116,22 @@ def _get_cached_input_tokens(usage) -> int:
 
 
 def _get_usage_tokens(usage) -> tuple:
-    inp = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None) or 0
-    out = getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None) or 0
+    inp = (
+        getattr(usage, "prompt_tokens", None)
+        or getattr(usage, "input_tokens", None)
+        or 0
+    )
+    out = (
+        getattr(usage, "completion_tokens", None)
+        or getattr(usage, "output_tokens", None)
+        or 0
+    )
     cached = _get_cached_input_tokens(usage)
     return inp, out, cached
 
 
 def _try_stream_usage(chunk):
-    """Return (input_tokens, output_tokens) if this chunk carries final usage, else None."""
+    """Return final usage tokens when a streaming chunk carries usage."""
     # Chat Completions: usage on the chunk itself
     usage = getattr(chunk, "usage", None)
     if usage is not None:
@@ -137,15 +146,17 @@ def _try_stream_usage(chunk):
 
 
 def _get_model_from_options(options) -> str:
-    """Return the model name from request options, or '' for GET requests (json_data=None)."""
+    """Return model name from request options, or ``""`` for GET requests."""
     if isinstance(options.json_data, dict):
         return options.json_data.get("model", "")
     return ""
 
 
 def _inject_stream_options(options) -> None:
-    """Inject stream_options only for chat/completions endpoints to avoid 400s elsewhere."""
-    if isinstance(options.json_data, dict) and "chat/completions" in str(getattr(options, "url", "")):
+    """Inject stream usage options only for chat/completions endpoints."""
+    if isinstance(options.json_data, dict) and "chat/completions" in str(
+        getattr(options, "url", "")
+    ):
         options.json_data.setdefault("stream_options", {"include_usage": True})
 
 
@@ -196,12 +207,12 @@ class _WrappedAsyncStream:
         return getattr(self._inner, name)
 
     async def __aenter__(self):
-        if hasattr(type(self._inner), '__aenter__'):
+        if hasattr(type(self._inner), "__aenter__"):
             await self._inner.__aenter__()
         return self
 
     async def __aexit__(self, *args):
-        if hasattr(type(self._inner), '__aexit__'):
+        if hasattr(type(self._inner), "__aexit__"):
             return await self._inner.__aexit__(*args)
 
 
@@ -213,9 +224,11 @@ def patch_openai() -> None:
         return
 
     import openai as _oai_pkg
+
     _ver = _parse_major_minor(getattr(_oai_pkg, "__version__", ""))
     if _ver is not None and _ver < (1, 76):
         import warnings
+
         warnings.warn(
             f"actguard requires openai>=1.76.0; detected {_oai_pkg.__version__}. "
             "Budget tracking may fail with this SDK version.",
@@ -223,7 +236,7 @@ def patch_openai() -> None:
             stacklevel=2,
         )
 
-    from openai._base_client import SyncAPIClient, AsyncAPIClient
+    from openai._base_client import AsyncAPIClient, SyncAPIClient
 
     _orig_request = SyncAPIClient.request
     _orig_async_request = AsyncAPIClient.request
@@ -231,14 +244,18 @@ def patch_openai() -> None:
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
         if state is None:
-            return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return _orig_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
 
         _check_limits(state)
         model = _get_model_from_options(options)
         if stream:
             _inject_stream_options(options)
 
-        result = _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        result = _orig_request(
+            self, cast_to, options, stream=stream, stream_cls=stream_cls
+        )
 
         if stream:
             return _WrappedSyncStream(result, model, state)
@@ -253,14 +270,18 @@ def patch_openai() -> None:
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
         if state is None:
-            return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return await _orig_async_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
 
         _check_limits(state)
         model = _get_model_from_options(options)
         if stream:
             _inject_stream_options(options)
 
-        result = await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        result = await _orig_async_request(
+            self, cast_to, options, stream=stream, stream_cls=stream_cls
+        )
 
         if stream:
             return _WrappedAsyncStream(result, model, state)

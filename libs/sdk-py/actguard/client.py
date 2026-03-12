@@ -3,125 +3,14 @@ from __future__ import annotations
 import base64
 import json
 import os
-import random
-import time
-import urllib.error
-import urllib.request
-import uuid
-from contextvars import Token
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from actguard._config import ActGuardConfig
-from actguard.core.run_context import (
-    RunState,
-    get_run_state,
-    reset_run_state,
-    set_run_state,
-)
+from actguard.core.runtime import ClientRunContext
 from actguard.events.client import EventClient
-
-
-class _ClientRunContext:
-    """Context manager installed by Client.run(...)."""
-
-    def __init__(
-        self,
-        *,
-        client: "Client",
-        user_id: Optional[str],
-        run_id: Optional[str],
-    ) -> None:
-        self.client = client
-        self.run_id = run_id if run_id is not None else str(uuid.uuid4())
-        self.user_id = user_id
-        self._state: Optional[RunState] = None
-        self._token: Optional[Token] = None
-
-    def __enter__(self) -> "_ClientRunContext":
-        from actguard.exceptions import NestedRuntimeContextError
-
-        active = get_run_state()
-        if active is not None:
-            raise NestedRuntimeContextError(
-                "Nested runtime contexts are not supported. "
-                f"Active run_id={active.run_id!r}; finish the current client.run(...) "
-                "before entering another."
-            )
-
-        self._state = RunState(
-            client=self.client,
-            run_id=self.run_id,
-            user_id=self.user_id,
-        )
-        self._token = set_run_state(self._state)
-        try:
-            from actguard.reporting import emit_event
-
-            emit_event(
-                "run",
-                "start",
-                {
-                    "run_id": self._state.run_id,
-                    "user_id": self._state.user_id,
-                },
-            )
-        except Exception:
-            pass
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        run_id = self.run_id
-        if self._state is not None:
-            run_id = self._state.run_id
-
-        try:
-            from actguard.reporting import emit_event
-
-            if exc_type is None:
-                emit_event(
-                    "run",
-                    "end",
-                    {"run_id": run_id},
-                    outcome="success",
-                )
-            else:
-                from actguard.exceptions import ActGuardError
-
-                if issubclass(exc_type, ActGuardError) and getattr(exc_type, "outcome", "") == "blocked":
-                    emit_event(
-                        "run",
-                        "end",
-                        {"run_id": run_id, "error_type": exc_type.__name__},
-                        severity="error",
-                        outcome="blocked",
-                    )
-                else:
-                    emit_event(
-                        "run",
-                        "end",
-                        {"run_id": run_id, "error_type": exc_type.__name__},
-                        severity="error",
-                        outcome="failed",
-                    )
-        except Exception:
-            pass
-
-        if self._token is not None:
-            reset_run_state(self._token)
-            self._token = None
-        self._state = None
-
-    async def __aenter__(self) -> "_ClientRunContext":
-        return self.__enter__()
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        return self.__exit__(exc_type, exc_val, exc_tb)
-
-    def get_attempt_count(self, tool_id: str) -> int:
-        if self._state is None:
-            return 0
-        return self._state.get_attempt_count(tool_id)
+from actguard.integrations.manager import IntegrationBootstrap
+from actguard.transport.budget_api import BudgetTransport
 
 
 class Client:
@@ -135,11 +24,39 @@ class Client:
         max_batch_events: int = 100,
         max_batch_bytes: int = 256_000,
         max_queue_events: int = 10_000,
-        timeout_s: float = 5.0,
-        max_retries: int = 8,
+        timeout_s: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        budget_timeout_s: Optional[float] = None,
+        budget_max_retries: Optional[int] = None,
+        event_timeout_s: Optional[float] = None,
+        event_max_retries: Optional[int] = None,
         backoff_base_ms: int = 200,
         backoff_max_ms: int = 10_000,
     ) -> None:
+        resolved_budget_timeout_s = (
+            budget_timeout_s if budget_timeout_s is not None else 3.0
+        )
+        resolved_event_timeout_s = (
+            event_timeout_s if event_timeout_s is not None else 5.0
+        )
+        resolved_budget_max_retries = (
+            budget_max_retries if budget_max_retries is not None else 1
+        )
+        resolved_event_max_retries = (
+            event_max_retries if event_max_retries is not None else 8
+        )
+
+        if timeout_s is not None:
+            if budget_timeout_s is None:
+                resolved_budget_timeout_s = timeout_s
+            if event_timeout_s is None:
+                resolved_event_timeout_s = timeout_s
+        if max_retries is not None:
+            if budget_max_retries is None:
+                resolved_budget_max_retries = max_retries
+            if event_max_retries is None:
+                resolved_event_max_retries = max_retries
+
         self.api_key = api_key
         self.gateway_url = gateway_url
         self.event_mode = event_mode
@@ -147,8 +64,16 @@ class Client:
         self.max_batch_events = max_batch_events
         self.max_batch_bytes = max_batch_bytes
         self.max_queue_events = max_queue_events
-        self.timeout_s = timeout_s
-        self.max_retries = max_retries
+        self.timeout_s = (
+            timeout_s if timeout_s is not None else resolved_event_timeout_s
+        )
+        self.max_retries = (
+            max_retries if max_retries is not None else resolved_event_max_retries
+        )
+        self.budget_timeout_s = resolved_budget_timeout_s
+        self.budget_max_retries = resolved_budget_max_retries
+        self.event_timeout_s = resolved_event_timeout_s
+        self.event_max_retries = resolved_event_max_retries
         self.backoff_base_ms = backoff_base_ms
         self.backoff_max_ms = backoff_max_ms
 
@@ -160,8 +85,12 @@ class Client:
             max_batch_events=max_batch_events,
             max_batch_bytes=max_batch_bytes,
             max_queue_events=max_queue_events,
-            timeout_s=timeout_s,
-            max_retries=max_retries,
+            budget_timeout_s=resolved_budget_timeout_s,
+            budget_max_retries=resolved_budget_max_retries,
+            event_timeout_s=resolved_event_timeout_s,
+            event_max_retries=resolved_event_max_retries,
+            timeout_s=self.timeout_s,
+            max_retries=self.max_retries,
             backoff_base_ms=backoff_base_ms,
             backoff_max_ms=backoff_max_ms,
         )
@@ -170,6 +99,8 @@ class Client:
             self._event_client = EventClient(self._config)
         else:
             self._event_client = None
+        self._budget_transport = BudgetTransport(self._config)
+        self._integration_bootstrap = IntegrationBootstrap()
 
     @property
     def event_client(self) -> Optional[EventClient]:
@@ -183,8 +114,8 @@ class Client:
         self,
         user_id: Optional[str] = None,
         run_id: Optional[str] = None,
-    ) -> _ClientRunContext:
-        return _ClientRunContext(client=self, user_id=user_id, run_id=run_id)
+    ) -> ClientRunContext:
+        return ClientRunContext(client=self, user_id=user_id, run_id=run_id)
 
     def budget_guard(
         self,
@@ -206,72 +137,8 @@ class Client:
             plan_key=plan_key,
         )
 
-    def _post_budget_api(
-        self, *, path: str, payload: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
-        from actguard.exceptions import ActGuardPaymentRequired, BudgetTransportError
-
-        if not self.gateway_url:
-            raise BudgetTransportError(
-                "Client.gateway_url is required for budget reserve/settle APIs."
-            )
-        if not self.api_key:
-            raise BudgetTransportError(
-                "Client.api_key is required for budget reserve/settle APIs."
-            )
-
-        body = json.dumps(payload).encode()
-        url = self.gateway_url.rstrip("/") + path
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                req = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers=headers,
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=self.timeout_s) as response:
-                    raw = response.read()
-                if not raw:
-                    return {}
-                parsed = json.loads(raw.decode())
-                if isinstance(parsed, dict):
-                    return parsed
-                return {}
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                if status == 402:
-                    raise ActGuardPaymentRequired(path=path, status=status, cause=exc) from exc
-                if status in (400, 401, 403, 422):
-                    raise BudgetTransportError(
-                        f"Budget API request failed with status {status} at {path}.",
-                        cause=exc,
-                        status_code=status,
-                    ) from exc
-                last_error = exc
-            except Exception as exc:
-                last_error = exc
-
-            if attempt < self.max_retries:
-                jitter = random.uniform(0, self.backoff_base_ms)
-                delay_ms = min(
-                    self.backoff_base_ms * (2**attempt) + jitter,
-                    self.backoff_max_ms,
-                )
-                time.sleep(delay_ms / 1000.0)
-
-        from actguard.exceptions import BudgetTransportError
-
-        raise BudgetTransportError(
-            f"Budget API request failed at {path}: {type(last_error).__name__}",
-            cause=last_error,
-        ) from last_error
+    def prepare_budget_scope(self) -> None:
+        self._integration_bootstrap.ensure_patched()
 
     def reserve_budget(
         self,
@@ -292,7 +159,7 @@ class Client:
             payload["plan_key"] = plan_key
         if user_id:
             payload["user_id"] = user_id
-        response = self._post_budget_api(path="/api/v1/reserve", payload=payload)
+        response = self._budget_transport.post(path="/api/v1/reserve", payload=payload)
         reserve_id = response.get("reserve_id")
         if not isinstance(reserve_id, str) or not reserve_id:
             raise BudgetTransportError(
@@ -318,7 +185,7 @@ class Client:
             "cached_input_tokens": cached_input_tokens,
             "output_tokens": output_tokens,
         }
-        self._post_budget_api(path="/api/v1/settle", payload=payload)
+        self._budget_transport.post(path="/api/v1/settle", payload=payload)
 
     def close(self) -> None:
         if self._event_client is None:
@@ -353,6 +220,8 @@ class Client:
 
     @classmethod
     def _from_mapping(cls, data: Mapping[str, Any]) -> "Client":
+        timeout_s = data.get("timeout_s")
+        max_retries = data.get("max_retries")
         return cls(
             api_key=data.get("api_key"),
             gateway_url=data.get("gateway_url"),
@@ -361,8 +230,12 @@ class Client:
             max_batch_events=data.get("max_batch_events", 100),
             max_batch_bytes=data.get("max_batch_bytes", 256_000),
             max_queue_events=data.get("max_queue_events", 10_000),
-            timeout_s=data.get("timeout_s", 5.0),
-            max_retries=data.get("max_retries", 8),
+            timeout_s=timeout_s,
+            max_retries=max_retries,
+            budget_timeout_s=data.get("budget_timeout_s"),
+            budget_max_retries=data.get("budget_max_retries"),
+            event_timeout_s=data.get("event_timeout_s"),
+            event_max_retries=data.get("event_max_retries"),
             backoff_base_ms=data.get("backoff_base_ms", 200),
             backoff_max_ms=data.get("backoff_max_ms", 10_000),
         )

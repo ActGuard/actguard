@@ -1,6 +1,7 @@
 import functools
 import inspect
 
+from actguard._monitoring import warn_monitoring_issue
 from actguard.events.context import reset_tool_name, set_tool_name
 
 from ._observability import emit_all_tool_runs_enabled, emit_tool_failure
@@ -103,8 +104,13 @@ def _emit_tool_invoke(tool_name: str) -> None:
     try:
         from actguard.reporting import emit_event
         emit_event("tool", "invoke", {"tool_name": tool_name}, outcome="success")
-    except Exception:
-        pass
+    except Exception as exc:
+        warn_monitoring_issue(
+            subsystem="reporting",
+            operation="tool.invoke",
+            exc=exc,
+            stacklevel=2,
+        )
 
 
 def _emit_tool_error(tool_name: str, exc: Exception) -> None:

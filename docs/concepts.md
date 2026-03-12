@@ -42,6 +42,10 @@ with client.run(user_id="alice"):
         ...
 ```
 
+`Client(...)` separates hot-path budget transport from background event
+transport. The defaults are `budget_timeout_s=3.0`, `budget_max_retries=1`,
+`event_timeout_s=5.0`, and `event_max_retries=8`.
+
 ### What it tracks
 
 - provider/model attribution
@@ -74,16 +78,20 @@ with client.run(user_id="alice"):
 For a root scope, ActGuard:
 
 1. validates there is an active `client.run(...)`
-2. patches supported provider transports
+2. ensures supported provider integrations are initialized for budget tracking
 3. reserves budget on enter
 4. records usage during model calls
 5. settles budget on exit
 
 Missing gateway credentials raise `BudgetTransportError`. A 402 from the budget API raises `ActGuardPaymentRequired`.
+Other reserve/settle transport failures degrade open after the configured
+budget transport deadline so the agent is not stalled by extended retry loops.
+Legacy `timeout_s` and `max_retries` still exist as compatibility aliases, but
+new code should use the budget- and event-specific settings.
 
 ## Patching
 
-Budget scopes call the provider patchers on entry. The patching is idempotent and transparent:
+For budget-guarded execution, ActGuard automatically initializes provider patching through the client/integration path. The patching is idempotent and transparent:
 
 - with no active budget scope, patched SDK methods behave like the originals
 - while a budget scope is active, usage is captured from non-streaming and streaming responses

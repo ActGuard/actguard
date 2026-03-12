@@ -11,6 +11,10 @@ class ActGuardConfig:
     max_batch_events: int = 100
     max_batch_bytes: int = 256_000
     max_queue_events: int = 10_000
+    budget_timeout_s: float = 3.0
+    budget_max_retries: int = 1
+    event_timeout_s: float = 5.0
+    event_max_retries: int = 8
     timeout_s: float = 5.0
     max_retries: int = 8
     backoff_base_ms: int = 200

@@ -1,11 +1,13 @@
 """actguard Python SDK."""
 
+from ._version import __version__
 from .budget import BudgetGuard
 from .client import Client
 from .exceptions import (
     ActGuardError,
     ActGuardPaymentRequired,
     ActGuardToolError,
+    MonitoringDegradedError,
 )
 from .reporting import emit_event, emit_violation
 from .session import session
@@ -29,12 +31,11 @@ from .tools import (
 )
 from .tools.timeout import shutdown
 
-__version__ = "0.1.0"
-
 __all__ = [
     "ActGuardError",
     "ActGuardPaymentRequired",
     "ActGuardToolError",
+    "MonitoringDegradedError",
     "BlockRegex",
     "BudgetGuard",
     "Client",

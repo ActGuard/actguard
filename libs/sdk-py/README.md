@@ -63,6 +63,10 @@ finally:
 
 Under the hood, `client.budget_guard(...)` reserves on enter (`POST /api/v1/reserve`)
 and settles on exit (`POST /api/v1/settle`) with your configured API key.
+Those hot-path budget calls default to `budget_timeout_s=3.0` and
+`budget_max_retries=1` so agents degrade open quickly if the gateway is
+unavailable. Background event delivery keeps its own retry budget via
+`event_timeout_s` and `event_max_retries`.
 
 Set different USD limits for different scopes:
 

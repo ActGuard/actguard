@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextvars import Token
 from typing import TYPE_CHECKING, Optional
 
+from actguard._monitoring import warn_monitoring_issue
 from actguard.core.budget_context import (
     BudgetState,
     SharedBudgetState,
@@ -17,7 +18,6 @@ from actguard.exceptions import (
     BudgetClientMismatchError,
     BudgetConfigurationError,
 )
-from actguard.integrations import patch_all
 
 if TYPE_CHECKING:
     from actguard.client import Client
@@ -59,6 +59,24 @@ class BudgetGuard:
         self._created_root = False
         self.run_id: Optional[str] = None
 
+    def _budget_reporting_enabled(self) -> bool:
+        config = self._client.reporting_config
+        return bool(config.gateway_url and config.api_key)
+
+    def _warn_budget_transport_issue(
+        self,
+        *,
+        operation: str,
+        exc: BaseException,
+    ) -> None:
+        warn_monitoring_issue(
+            subsystem="budget",
+            operation=operation,
+            exc=exc,
+            path=f"/api/v1/{operation}",
+            stacklevel=3,
+        )
+
     def _bind_run_state(self) -> Optional[str]:
         from actguard.core.run_context import require_run_state
 
@@ -98,7 +116,10 @@ class BudgetGuard:
             raise BudgetConfigurationError(
                 "budget_guard name does not match the existing root scope."
             )
-        if self.usd_limit is not None and shared_root.root_budget_limit != self.usd_limit:
+        if (
+            self.usd_limit is not None
+            and shared_root.root_budget_limit != self.usd_limit
+        ):
             raise BudgetConfigurationError(
                 "budget_guard usd_limit does not match the existing root scope."
             )
@@ -166,7 +187,7 @@ class BudgetGuard:
             )
 
         active_user_id = self._bind_run_state()
-        patch_all()
+        self._client.prepare_budget_scope()
         assert self._run_id is not None
 
         effective_user_id = self.user_id if self.user_id is not None else active_user_id
@@ -181,14 +202,22 @@ class BudgetGuard:
         try:
             if self._is_root_scope and self._created_root:
                 assert self._shared_root is not None
-                reserve_id = self._client.reserve_budget(
-                    run_id=self._run_id,
-                    usd_limit_micros=self._shared_root.root_budget_limit_micros,
-                    plan_key=self._shared_root.plan_key,
-                    user_id=self._shared_root.user_id,
-                )
-                self._shared_root.reserve_id = reserve_id
-                self._state.reserve_id = reserve_id
+                if self._budget_reporting_enabled():
+                    try:
+                        reserve_id = self._client.reserve_budget(
+                            run_id=self._run_id,
+                            usd_limit_micros=self._shared_root.root_budget_limit_micros,
+                            plan_key=self._shared_root.plan_key,
+                            user_id=self._shared_root.user_id,
+                        )
+                    except Exception as exc:
+                        self._warn_budget_transport_issue(
+                            operation="reserve",
+                            exc=exc,
+                        )
+                    else:
+                        self._shared_root.reserve_id = reserve_id
+                        self._state.reserve_id = reserve_id
 
             self._budget_token = push_budget_scope(
                 scope,
@@ -207,8 +236,6 @@ class BudgetGuard:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        settle_error: Optional[Exception] = None
-
         if self._budget_token is not None:
             pop_budget_scope(self._budget_token)
             self._budget_token = None
@@ -222,16 +249,23 @@ class BudgetGuard:
                     if shared_root.reserve_id and shared_root.mark_settled():
                         if self._state is not None and shared_root.tokens_used == 0:
                             shared_root.provider = self._state.provider
-                            shared_root.provider_model_id = self._state.provider_model_id
+                            shared_root.provider_model_id = (
+                                self._state.provider_model_id
+                            )
                             shared_root.input_tokens = self._state.input_tokens
-                            shared_root.cached_input_tokens = self._state.cached_input_tokens
+                            shared_root.cached_input_tokens = (
+                                self._state.cached_input_tokens
+                            )
                             shared_root.output_tokens = self._state.output_tokens
                             shared_root.tokens_used = self._state.tokens_used
                             shared_root.usd_used = self._state.usd_used
-                        has_usage = (shared_root.input_tokens + shared_root.output_tokens) > 0
+                        has_usage = (
+                            shared_root.input_tokens + shared_root.output_tokens
+                        ) > 0
                         self._client.settle_budget(
                             reserve_id=shared_root.reserve_id,
-                            provider=shared_root.provider or ("none" if not has_usage else ""),
+                            provider=shared_root.provider
+                            or ("none" if not has_usage else ""),
                             provider_model_id=(
                                 shared_root.provider_model_id
                                 or ("none" if not has_usage else "")
@@ -241,13 +275,14 @@ class BudgetGuard:
                             output_tokens=shared_root.output_tokens,
                         )
                 except Exception as exc:
-                    settle_error = exc
+                    self._warn_budget_transport_issue(
+                        operation="settle",
+                        exc=exc,
+                    )
 
         self._run_state = None
         self._run_id = None
 
-        if settle_error is not None and exc_type is None:
-            raise settle_error
         return None
 
     async def __aenter__(self) -> "BudgetGuard":

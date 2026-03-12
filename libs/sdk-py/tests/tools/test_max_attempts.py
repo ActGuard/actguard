@@ -448,6 +448,7 @@ def test_public_imports():
     assert hasattr(actguard, "ActGuardError")
     assert hasattr(actguard, "ActGuardToolError")
     assert hasattr(actguard, "ActGuardPaymentRequired")
+    assert hasattr(actguard, "MonitoringDegradedError")
 
 
 def test_max_attempts_exceeded_in_all():
@@ -464,6 +465,7 @@ def test_run_context_in_all():
 
 def test_nested_run_context_error_in_all():
     assert "ActGuardPaymentRequired" in actguard.__all__
+    assert "MonitoringDegradedError" in actguard.__all__
 
 
 def test_max_attempts_in_all():

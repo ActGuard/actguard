@@ -371,6 +371,7 @@ def test_public_imports():
     assert hasattr(actguard, "ActGuardError")
     assert hasattr(actguard, "ActGuardToolError")
     assert hasattr(actguard, "ActGuardPaymentRequired")
+    assert hasattr(actguard, "MonitoringDegradedError")
 
 
 def test_new_symbols_in_all():
@@ -378,3 +379,4 @@ def test_new_symbols_in_all():
     assert "ActGuardError" in actguard.__all__
     assert "ActGuardToolError" in actguard.__all__
     assert "ActGuardPaymentRequired" in actguard.__all__
+    assert "MonitoringDegradedError" in actguard.__all__

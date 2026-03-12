@@ -9,6 +9,7 @@ from actguard.core.run_context import get_run_state
 from actguard.exceptions import (
     MaxAttemptsExceeded,
     MissingRuntimeContextError,
+    MonitoringDegradedError,
     RateLimitExceeded,
     ToolTimeoutError,
 )
@@ -16,6 +17,10 @@ from actguard.tools.idempotent import idempotent
 from actguard.tools.max_attempts import max_attempts
 from actguard.tools.rate_limit import rate_limit
 from actguard.tools.timeout import timeout
+
+
+def _raise_reporting_down(*_args, **_kwargs):
+    raise RuntimeError("reporting down")
 
 
 def test_max_attempts_inside_client_run_without_budget_guard():
@@ -128,3 +133,41 @@ def test_tool_decorator_inherits_active_run_state():
 
     with client.run(run_id="run-tool", user_id="alice"):
         assert fn() == ("run-tool", "alice")
+
+
+def test_client_run_reporting_failure_warns_without_breaking_context(monkeypatch):
+    client = actguard.Client()
+
+    monkeypatch.setattr("actguard.reporting.emit_event", _raise_reporting_down)
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        with client.run(run_id="run-reporting"):
+            state = get_run_state()
+            assert state is not None
+            assert state.run_id == "run-reporting"
+
+    assert len(recorded) == 2
+    first = recorded[0].message.error
+    second = recorded[1].message.error
+    assert isinstance(first, MonitoringDegradedError)
+    assert isinstance(second, MonitoringDegradedError)
+    assert first.operation == "run.start"
+    assert second.operation == "run.end"
+
+
+def test_tool_decorator_reporting_failure_warns_without_breaking_function(monkeypatch):
+    client = actguard.Client()
+    monkeypatch.setenv("ACTGUARD_EMIT_ALL_TOOL_RUNS", "1")
+
+    monkeypatch.setattr("actguard.reporting.emit_event", _raise_reporting_down)
+
+    @actguard.tool()
+    def fn():
+        return "ok"
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        with client.run(run_id="run-tool-warning"):
+            assert fn() == "ok"
+
+    operations = [warning.message.error.operation for warning in recorded]
+    assert "tool.invoke" in operations

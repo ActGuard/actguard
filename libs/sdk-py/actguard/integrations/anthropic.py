@@ -1,7 +1,13 @@
 import importlib.util
-from typing import Iterator, AsyncIterator
+from typing import AsyncIterator, Iterator
 
-from actguard.core.budget_context import add_cost, check_budget_limits, get_budget_state, record_usage
+from actguard.budget_events import emit_budget_blocked
+from actguard.core.budget_context import (
+    add_cost,
+    check_budget_limits,
+    get_budget_state,
+    record_usage,
+)
 from actguard.core.pricing import get_cost
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
@@ -48,9 +54,7 @@ def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> N
 def _check_limits(state) -> None:
     if get_budget_state() is None:
         if state.usd_limit is not None and state.usd_used >= state.usd_limit:
-            from actguard.reporting import _emit_budget_blocked
-
-            _emit_budget_blocked(state)
+            emit_budget_blocked(state)
             raise BudgetExceededError(
                 user_id=state.user_id,
                 tokens_used=state.tokens_used,
@@ -66,10 +70,8 @@ def _check_limits(state) -> None:
         return
     violation = check_budget_limits()
     if violation is not None:
-        from actguard.reporting import _emit_budget_blocked
-
         blocked_scope = violation.blocked_scope
-        _emit_budget_blocked(blocked_scope)
+        emit_budget_blocked(blocked_scope)
         raise BudgetExceededError(
             user_id=blocked_scope.user_id,
             tokens_used=blocked_scope.tokens_used,
@@ -184,7 +186,7 @@ def patch_anthropic() -> None:
     if importlib.util.find_spec("anthropic") is None:
         return
 
-    from anthropic._base_client import SyncAPIClient, AsyncAPIClient
+    from anthropic._base_client import AsyncAPIClient, SyncAPIClient
 
     _orig_request = SyncAPIClient.request
     _orig_async_request = AsyncAPIClient.request
@@ -192,18 +194,26 @@ def patch_anthropic() -> None:
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
         if state is None:
-            return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return _orig_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
         if not _is_messages_endpoint(options):
-            return _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return _orig_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
 
         _check_limits(state)
         model = _get_model_from_options(options)
 
         if stream:
-            result = _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            result = _orig_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
             return _WrappedSyncStream(result, model, state)
 
-        response = _orig_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        response = _orig_request(
+            self, cast_to, options, stream=stream, stream_cls=stream_cls
+        )
         if response.usage is not None:
             _record_usage(
                 state,
@@ -217,18 +227,26 @@ def patch_anthropic() -> None:
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
         if state is None:
-            return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return await _orig_async_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
         if not _is_messages_endpoint(options):
-            return await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            return await _orig_async_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
 
         _check_limits(state)
         model = _get_model_from_options(options)
 
         if stream:
-            result = await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+            result = await _orig_async_request(
+                self, cast_to, options, stream=stream, stream_cls=stream_cls
+            )
             return _WrappedAsyncStream(result, model, state)
 
-        response = await _orig_async_request(self, cast_to, options, stream=stream, stream_cls=stream_cls)
+        response = await _orig_async_request(
+            self, cast_to, options, stream=stream, stream_cls=stream_cls
+        )
         if response.usage is not None:
             _record_usage(
                 state,

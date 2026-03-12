@@ -4,7 +4,13 @@ import re
 import warnings
 from typing import Any, Optional
 
-from actguard.core.budget_context import add_cost, check_budget_limits, get_budget_state, record_usage
+from actguard.budget_events import emit_budget_blocked
+from actguard.core.budget_context import (
+    add_cost,
+    check_budget_limits,
+    get_budget_state,
+    record_usage,
+)
 from actguard.core.pricing import get_cost
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
@@ -52,9 +58,7 @@ def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> N
 def _check_limits(state) -> None:
     if get_budget_state() is None:
         if state.usd_limit is not None and state.usd_used >= state.usd_limit:
-            from actguard.reporting import _emit_budget_blocked
-
-            _emit_budget_blocked(state)
+            emit_budget_blocked(state)
             raise BudgetExceededError(
                 user_id=state.user_id,
                 tokens_used=state.tokens_used,
@@ -70,10 +74,8 @@ def _check_limits(state) -> None:
         return
     violation = check_budget_limits()
     if violation is not None:
-        from actguard.reporting import _emit_budget_blocked
-
         blocked_scope = violation.blocked_scope
-        _emit_budget_blocked(blocked_scope)
+        emit_budget_blocked(blocked_scope)
         raise BudgetExceededError(
             user_id=blocked_scope.user_id,
             tokens_used=blocked_scope.tokens_used,
@@ -104,7 +106,9 @@ def _warn_if_old_version(genai_module) -> None:
         warnings.warn(
             (
                 "actguard low-level google-genai patch expects "
-                f"google-genai>={_MIN_GOOGLE_GENAI_VERSION[0]}.{_MIN_GOOGLE_GENAI_VERSION[1]}; "
+                "google-genai>="
+                f"{_MIN_GOOGLE_GENAI_VERSION[0]}."
+                f"{_MIN_GOOGLE_GENAI_VERSION[1]}; "
                 f"detected {version}. Budget tracking may fail with this SDK version."
             ),
             UserWarning,
@@ -275,12 +279,12 @@ class _WrappedAsyncStream:
         return getattr(self._inner, name)
 
     async def __aenter__(self):
-        if hasattr(type(self._inner), '__aenter__'):
+        if hasattr(type(self._inner), "__aenter__"):
             await self._inner.__aenter__()
         return self
 
     async def __aexit__(self, *args):
-        if hasattr(type(self._inner), '__aexit__'):
+        if hasattr(type(self._inner), "__aexit__"):
             return await self._inner.__aexit__(*args)
 
 
@@ -304,9 +308,19 @@ def patch_google() -> None:
     _orig_request = getattr(BaseApiClient, "request", None)
     _orig_request_streamed = getattr(BaseApiClient, "request_streamed", None)
     _orig_async_request = getattr(BaseApiClient, "async_request", None)
-    _orig_async_request_streamed = getattr(BaseApiClient, "async_request_streamed", None)
+    _orig_async_request_streamed = getattr(
+        BaseApiClient, "async_request_streamed", None
+    )
 
-    if not all(callable(fn) for fn in (_orig_request, _orig_request_streamed, _orig_async_request, _orig_async_request_streamed)):
+    if not all(
+        callable(fn)
+        for fn in (
+            _orig_request,
+            _orig_request_streamed,
+            _orig_async_request,
+            _orig_async_request_streamed,
+        )
+    ):
         return
 
     def _request(self, *args, **kwargs):

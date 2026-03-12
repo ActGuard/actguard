@@ -41,6 +41,9 @@ For reserve/settle-backed budget scopes, provide both `api_key` and `gateway_url
 The hosted ActGuard gateway uses `https://api.actguard.ai`. If you run your own
 gateway, pass that base URL instead. `Client.from_env()` and `Client.from_file(...)`
 remain available for config-driven setup.
+Budget reserve/settle runs on a fast fail-open transport profile by default
+(`budget_timeout_s=3.0`, `budget_max_retries=1`), while background event
+delivery uses separate event transport settings.
 
 ## Key features
 
@@ -64,6 +67,10 @@ your code
               ├── accumulate usd_used and tokens_used
               └── settle budget on exit
 ```
+
+If the gateway is slow or unavailable, the budget transport gives up quickly
+and degrades open so the agent can keep moving; event shipping may retry
+independently in the background.
 
 ## Next steps
 

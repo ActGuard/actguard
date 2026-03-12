@@ -12,8 +12,12 @@ class actguard.Client(
     max_batch_events: int = 100,
     max_batch_bytes: int = 256_000,
     max_queue_events: int = 10_000,
-    timeout_s: float = 5.0,
-    max_retries: int = 8,
+    timeout_s: float | None = None,
+    max_retries: int | None = None,
+    budget_timeout_s: float | None = None,
+    budget_max_retries: int | None = None,
+    event_timeout_s: float | None = None,
+    event_max_retries: int | None = None,
     backoff_base_ms: int = 200,
     backoff_max_ms: int = 10_000,
 )
@@ -35,6 +39,32 @@ ag = Client(
 `gateway_url` is the base URL for the ActGuard gateway API. The SDK does not
 hardcode a specific host; `https://api.actguard.ai` is the hosted ActGuard
 gateway, and self-hosted/custom gateways can use any compatible base URL.
+
+Budget reserve/settle calls default to a fast fail-open transport profile:
+`budget_timeout_s=3.0` and `budget_max_retries=1`. Background event shipping
+uses `event_timeout_s=5.0` and `event_max_retries=8`. Legacy `timeout_s` and
+`max_retries` remain as compatibility aliases that populate both subsystems
+when the newer subsystem-specific settings are not provided.
+
+### Parameters
+
+| Argument | Type | Default | Description |
+|---|---|---|---|
+| `api_key` | `str \| None` | `None` | Bearer token used for budget reserve/settle calls and event delivery when gateway reporting is enabled. |
+| `gateway_url` | `str \| None` | `None` | Base URL for the ActGuard gateway API. |
+| `event_mode` | `str` | `"verbose"` | Event reporting mode. `"off"` disables event shipping; `"significant"` and `"verbose"` keep reporting enabled with different detail levels. |
+| `flush_interval_ms` | `int` | `1000` | Background event batch flush interval in milliseconds. |
+| `max_batch_events` | `int` | `100` | Maximum number of events to include in a single shipped batch. |
+| `max_batch_bytes` | `int` | `256_000` | Maximum serialized batch size in bytes before the event worker starts a new batch. |
+| `max_queue_events` | `int` | `10_000` | In-memory event queue capacity before new events are dropped. |
+| `timeout_s` | `float \| None` | `None` | Legacy compatibility alias that populates both `budget_timeout_s` and `event_timeout_s` when the subsystem-specific values are omitted. |
+| `max_retries` | `int \| None` | `None` | Legacy compatibility alias that populates both `budget_max_retries` and `event_max_retries` when the subsystem-specific values are omitted. |
+| `budget_timeout_s` | `float \| None` | `None` | Hot-path timeout budget for reserve/settle calls. When omitted, the client uses `3.0` seconds. |
+| `budget_max_retries` | `int \| None` | `None` | Retry count for reserve/settle calls. When omitted, the client uses `1`. |
+| `event_timeout_s` | `float \| None` | `None` | Per-attempt timeout for background event shipping. When omitted, the client uses `5.0` seconds. |
+| `event_max_retries` | `int \| None` | `None` | Retry count for background event shipping. When omitted, the client uses `8`. |
+| `backoff_base_ms` | `int` | `200` | Base delay in milliseconds for exponential backoff used by retrying transports. |
+| `backoff_max_ms` | `int` | `10_000` | Maximum backoff delay in milliseconds for retrying transports. |
 
 ### Constructors
 

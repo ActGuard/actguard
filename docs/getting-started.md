@@ -28,6 +28,11 @@ ag = Client(
 For reserve/settle-backed budget scopes, provide both `api_key` and `gateway_url`.
 The hosted ActGuard gateway uses `https://api.actguard.ai`. If you self-host or
 run a custom gateway, pass that base URL instead.
+By default, hot-path budget transport is tuned to fail open quickly with
+`budget_timeout_s=3.0` and `budget_max_retries=1`. Background event delivery
+uses `event_timeout_s=5.0` and `event_max_retries=8`.
+See the [API reference](./api-reference.md) for a full description of every
+`Client(...)` init argument.
 
 You can also load the same settings from config:
 
@@ -41,6 +46,8 @@ ag = Client.from_file("./actguard.json")
 
 `ACTGUARD_CONFIG` can be either a base64-encoded JSON blob or a path to a JSON
 config file.
+Legacy `timeout_s` and `max_retries` remain supported as compatibility aliases,
+but new code should prefer the budget- and event-specific transport settings.
 
 ## Set a USD limit
 
@@ -82,6 +89,10 @@ finally:
     if guard is not None:
         print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
 ```
+
+If the gateway is unavailable, budget reserve/settle degrades open after the
+configured budget transport deadline instead of blocking the agent loop for a
+long retry sequence.
 
 ## Nested budget scopes
 

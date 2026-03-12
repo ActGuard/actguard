@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from typing import TYPE_CHECKING, Optional
 
+from actguard._monitoring import warn_monitoring_issue
+
 if TYPE_CHECKING:
     from actguard._config import ActGuardConfig
     from actguard.events.envelope import Envelope
@@ -36,7 +38,7 @@ class EventClient:
     def close(self, wait: bool = True) -> None:
         self._stop.set()
         if wait:
-            self._thread.join(timeout=self._config.timeout_s + 1)
+            self._thread.join(timeout=self._config.event_timeout_s + 1)
 
     def _worker(self) -> None:
         interval_s = self._config.flush_interval_ms / 1000.0
@@ -96,8 +98,9 @@ class EventClient:
 
         base_ms = self._config.backoff_base_ms
         max_ms = self._config.backoff_max_ms
-        max_retries = self._config.max_retries
-        timeout_s = self._config.timeout_s
+        max_retries = self._config.event_max_retries
+        timeout_s = self._config.event_timeout_s
+        last_error: BaseException | None = None
 
         for attempt in range(max_retries + 1):
             if self._stop.is_set() and attempt > 0:
@@ -109,17 +112,28 @@ class EventClient:
                 with urllib.request.urlopen(req, timeout=timeout_s):
                     return  # success
             except urllib.error.HTTPError as exc:
+                last_error = exc
                 status = exc.code
                 if status in (400, 401, 403):
-                    return  # no retry
+                    break
                 # 429, 5xx → retry
-            except Exception:
-                pass  # network error → retry
+            except Exception as exc:
+                last_error = exc
+                # network error → retry
 
             if attempt < max_retries:
                 jitter = random.uniform(0, base_ms)
                 delay_ms = min(base_ms * (2**attempt) + jitter, max_ms)
                 time.sleep(delay_ms / 1000.0)
+
+        if last_error is not None:
+            warn_monitoring_issue(
+                subsystem="events",
+                operation="ship",
+                exc=last_error,
+                path="/api/v1/events",
+                stacklevel=2,
+            )
 
 
 # Module-level singleton

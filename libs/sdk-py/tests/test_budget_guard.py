@@ -445,7 +445,7 @@ class TestNestedBudgetScopes:
     def test_second_path_attaches_to_shared_root_and_reuses_single_reserve(self, monkeypatch):
         import concurrent.futures
 
-        client = actguard.Client()
+        client = actguard.Client(gateway_url="https://gw.example", api_key="sk-test")
         calls = []
 
         monkeypatch.setattr(

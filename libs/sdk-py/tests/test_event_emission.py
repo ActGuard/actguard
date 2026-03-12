@@ -13,11 +13,13 @@ from actguard.exceptions import BudgetExceededError
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     runtime_client = actguard.Client(
         gateway_url="http://localhost:9999",
         api_key="test-key",
     )
+    assert runtime_client.event_client is not None
+    monkeypatch.setattr(runtime_client.event_client, "_ship_with_retry", lambda batch: None)
     try:
         yield runtime_client
     finally:

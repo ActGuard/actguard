@@ -14,6 +14,7 @@ from actguard.exceptions import (
     ActGuardPaymentRequired,
     BudgetTransportError,
     MissingRuntimeContextError,
+    MonitoringDegradedError,
     NestedRuntimeContextError,
 )
 
@@ -103,12 +104,73 @@ def test_run_context_clears_after_exception():
     assert get_run_state() is None
 
 
+def test_client_defaults_split_budget_and_event_transport_config():
+    client = actguard.Client()
+
+    assert client.budget_timeout_s == 3.0
+    assert client.budget_max_retries == 1
+    assert client.event_timeout_s == 5.0
+    assert client.event_max_retries == 8
+    assert client.timeout_s == client.event_timeout_s
+    assert client.max_retries == client.event_max_retries
+
+
+def test_legacy_timeout_alias_populates_both_transport_configs():
+    client = actguard.Client(timeout_s=2.5, max_retries=3)
+
+    assert client.timeout_s == 2.5
+    assert client.max_retries == 3
+    assert client.budget_timeout_s == 2.5
+    assert client.budget_max_retries == 3
+    assert client.event_timeout_s == 2.5
+    assert client.event_max_retries == 3
+
+
+def test_subsystem_specific_transport_config_overrides_legacy_aliases():
+    client = actguard.Client(
+        timeout_s=9.0,
+        max_retries=4,
+        budget_timeout_s=0.75,
+        budget_max_retries=1,
+    )
+
+    assert client.timeout_s == 9.0
+    assert client.max_retries == 4
+    assert client.budget_timeout_s == 0.75
+    assert client.budget_max_retries == 1
+    assert client.event_timeout_s == 9.0
+    assert client.event_max_retries == 4
+
+
+def test_client_from_file_accepts_split_transport_config(tmp_path):
+    config_file = tmp_path / "actguard.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "gateway_url": "https://api.actguard.io",
+                "api_key": "sk-test",
+                "budget_timeout_s": 0.5,
+                "budget_max_retries": 0,
+                "event_timeout_s": 7.0,
+                "event_max_retries": 2,
+            }
+        )
+    )
+
+    client = actguard.Client.from_file(config_file)
+
+    assert client.budget_timeout_s == 0.5
+    assert client.budget_max_retries == 0
+    assert client.event_timeout_s == 7.0
+    assert client.event_max_retries == 2
+
+
 def test_reserve_budget_posts_expected_request_shape(monkeypatch):
     captured = {}
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=0,
+        budget_max_retries=0,
     )
 
     class _Response:
@@ -148,7 +210,7 @@ def test_reserve_budget_posts_expected_request_shape(monkeypatch):
         "plan_key": "pro",
         "user_id": "alice",
     }
-    assert captured["timeout"] == client.timeout_s
+    assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
 
 
 def test_settle_budget_posts_expected_request_shape(monkeypatch):
@@ -156,7 +218,7 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=0,
+        budget_max_retries=0,
     )
 
     class _Response:
@@ -197,7 +259,7 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
         "cached_input_tokens": 0,
         "output_tokens": 30,
     }
-    assert captured["timeout"] == client.timeout_s
+    assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
 
 
 def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
@@ -205,7 +267,7 @@ def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=0,
+        budget_max_retries=0,
     )
 
     class _Response:
@@ -229,7 +291,7 @@ def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
 
     assert reserve_id == "res-123"
     assert captured["payload"] == {"run_id": "run-1"}
-    assert captured["timeout"] == client.timeout_s
+    assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
 
 
 def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
@@ -237,7 +299,7 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=0,
+        budget_max_retries=0,
     )
 
     class _Response:
@@ -266,14 +328,14 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
 
     assert reserve_id == "res-123"
     assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
-    assert captured["timeout"] == client.timeout_s
+    assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
 
 
 def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=8,
+        budget_max_retries=8,
     )
     attempts = {"count": 0}
     sleeps: list[float] = []
@@ -306,7 +368,7 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=8,
+        budget_max_retries=8,
     )
     attempts = {"count": 0}
     sleeps: list[float] = []
@@ -346,7 +408,7 @@ def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=8,
+        budget_max_retries=8,
     )
     attempts = {"count": 0}
     sleeps: list[float] = []
@@ -376,7 +438,8 @@ def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
-        max_retries=2,
+        budget_timeout_s=10.0,
+        budget_max_retries=2,
     )
     attempts = {"count": 0}
     sleeps: list[float] = []
@@ -403,8 +466,35 @@ def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     assert "HTTPError" in str(excinfo.value)
 
 
+def test_reserve_budget_retry_backoff_respects_total_budget_timeout(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_timeout_s=0.25,
+        budget_max_retries=2,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise urllib.error.URLError(TimeoutError(f"attempt={attempts['count']}"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr("random.uniform", lambda lower, upper: 0.0)
+    monotonic_values = iter([0.0, 0.0, 0.0, 0.2, 0.25])
+    monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(BudgetTransportError):
+        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+
+    assert attempts["count"] == 2
+    assert sleeps == [0.2]
+
+
 def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):
-    client = actguard.Client()
+    client = actguard.Client(gateway_url="https://gw.example", api_key="sk-test")
     assert get_run_state() is None
     assert get_budget_state() is None
     assert get_current_state() is None
@@ -428,6 +518,78 @@ def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):
 
     assert get_run_state() is None
     assert get_budget_state() is None
+    assert get_current_state() is None
+
+
+def test_budget_guard_without_gateway_config_skips_remote_reporting(monkeypatch):
+    client = actguard.Client()
+    calls: list[str] = []
+
+    def should_not_call(**_kwargs):
+        calls.append("remote")
+        raise AssertionError("reserve/settle should be skipped without gateway config")
+
+    monkeypatch.setattr(client, "reserve_budget", should_not_call)
+    monkeypatch.setattr(client, "settle_budget", should_not_call)
+
+    with client.run(run_id="run-local-only"):
+        with client.budget_guard(usd_limit=0.05):
+            budget_state = get_budget_state()
+            assert budget_state is not None
+            assert budget_state.reserve_id is None
+
+    assert calls == []
+
+
+def test_budget_guard_reserve_transport_failure_warns_and_degrades_open(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    def fail_reserve(**_kwargs):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(client, "reserve_budget", fail_reserve)
+    monkeypatch.setattr(client, "settle_budget", lambda **_kwargs: None)
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        with client.run(run_id="run-warn-reserve"):
+            with client.budget_guard(usd_limit=0.05):
+                budget_state = get_budget_state()
+                assert budget_state is not None
+                assert budget_state.reserve_id is None
+
+    warning = recorded[0].message
+    assert isinstance(warning.error, MonitoringDegradedError)
+    assert warning.error.subsystem == "budget"
+    assert warning.error.operation == "reserve"
+    assert warning.error.failure_kind == "timeout"
+
+
+def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(client, "reserve_budget", lambda **_kwargs: "res-123")
+
+    def fail_settle(**_kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+    monkeypatch.setattr(client, "settle_budget", fail_settle)
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        with client.run(run_id="run-warn-settle"):
+            with client.budget_guard(usd_limit=0.05):
+                pass
+
+    warning = recorded[0].message
+    assert isinstance(warning.error, MonitoringDegradedError)
+    assert warning.error.subsystem == "budget"
+    assert warning.error.operation == "settle"
+    assert warning.error.failure_kind == "connection"
     assert get_current_state() is None
 
 
@@ -460,7 +622,7 @@ def test_client_budget_guard_inside_run_reuses_existing_run(monkeypatch):
 
 
 def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
-    client = actguard.Client()
+    client = actguard.Client(gateway_url="https://gw.example", api_key="sk-test")
     calls = []
 
     def reserve(**kwargs):
@@ -501,8 +663,8 @@ def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
 
 
 def test_budget_guard_no_leakage_between_clients(monkeypatch):
-    client_a = actguard.Client()
-    client_b = actguard.Client()
+    client_a = actguard.Client(gateway_url="https://gw.example", api_key="key-a")
+    client_b = actguard.Client(gateway_url="https://gw.example", api_key="key-b")
     calls_a = []
     calls_b = []
 
@@ -555,3 +717,62 @@ def test_client_close_waits_for_event_client_shutdown():
 
     assert seen == {"wait": True}
     assert client.event_client is None
+
+
+def test_event_client_ships_with_event_transport_config(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        event_timeout_s=7.0,
+        event_max_retries=2,
+    )
+    assert client.event_client is not None
+    captured = {"attempts": 0}
+    sleeps: list[float] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+    def fake_urlopen(request, timeout):
+        captured["attempts"] += 1
+        captured["timeout"] = timeout
+        if captured["attempts"] < 3:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr("random.uniform", lambda lower, upper: 0.0)
+
+    client.event_client._ship_with_retry([{"name": "evt"}])
+
+    assert captured["attempts"] == 3
+    assert captured["timeout"] == 7.0
+    assert sleeps == [0.2, 0.4]
+
+    client.close()
+
+
+def test_event_client_close_wait_uses_event_timeout(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        event_timeout_s=7.0,
+    )
+    assert client.event_client is not None
+    seen = {}
+
+    def fake_join(timeout):
+        seen["timeout"] = timeout
+
+    monkeypatch.setattr(client.event_client._thread, "join", fake_join)
+
+    client.event_client.close(wait=True)
+
+    assert seen == {"timeout": 8.0}
+
+    client.close()

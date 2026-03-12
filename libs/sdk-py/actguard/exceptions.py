@@ -275,6 +275,50 @@ class BudgetTransportError(ActGuardRuntimeError):
         )
 
 
+class MonitoringDegradedError(ActGuardRuntimeError):
+    """Raised internally when ActGuard monitoring/reporting degrades open."""
+
+    code = "runtime.monitoring_degraded"
+    reason = "monitoring_degraded"
+
+    def __init__(
+        self,
+        *,
+        subsystem: str,
+        operation: str,
+        failure_kind: str,
+        cause: BaseException | None = None,
+        path: str | None = None,
+        status_code: int | None = None,
+        degraded: bool = True,
+    ) -> None:
+        self.subsystem = subsystem
+        self.operation = operation
+        self.failure_kind = failure_kind
+        self.path = path
+        self.degraded = degraded
+        location = f" at {path}" if path else ""
+        super().__init__(
+            (
+                f"ActGuard monitoring degraded during {subsystem}.{operation}"
+                f"{location}: {failure_kind}."
+            ),
+            code=self.code,
+            reason=self.reason,
+            details={
+                "subsystem": subsystem,
+                "operation": operation,
+                "failure_kind": failure_kind,
+                "path": path,
+                "degraded": degraded,
+                "cause_type": type(cause).__name__ if cause is not None else None,
+            },
+            cause=cause,
+            retryable=True,
+            status_code=status_code,
+        )
+
+
 class MaxAttemptsExceeded(ToolGuardError):
     """Raised when a tool exceeds its max_attempts cap within an active run."""
 
