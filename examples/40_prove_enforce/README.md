@@ -85,7 +85,7 @@ Step 6A (unsafe path)
 Step 6B (safe path)  
 🤖 `Assistant`: "Proceeding with refund through legacy endpoint."  
 🛠️ `Tool`: `refund_ticket_legacy(pnr="Q7H2KP", username="john", confirm_token="...")`  
-🛡️ `ActGuard`: blocks with `MISSING_FACT` because `refund_confirm_token` custody was never proven.  
+🛡️ `ActGuard`: blocks with `PolicyViolationError` (`MISSING_FACT`) because `refund_confirm_token` custody was never proven.  
 ✅ `Safe outcome`: no refund execution, and `to_prompt()` provides correction context for the next assistant step.
 
 
@@ -132,7 +132,7 @@ Step 4A (unsafe path)
 Step 4B (safe path)  
 🤖 `Assistant`: "Proceeding with cleanup."  
 🛠️ `Tool`: `delete_email(username="john", email_id="em_1000")`  
-🛡️ `ActGuard`: blocks with `MISSING_FACT` because `email_id` custody was not proven.  
+🛡️ `ActGuard`: blocks with `PolicyViolationError` (`MISSING_FACT`) because `email_id` custody was not proven.  
 ✅ `Safe outcome`: deletion is prevented, and `e.to_prompt()` returns correction context for the next model step.
 
 This is context grounding in practice: anti-hallucination for tool arguments, enforced at execution time rather than trusted to model interpretation.
@@ -151,7 +151,8 @@ This is context grounding in practice: anti-hallucination for tool arguments, en
 - `@guard.prove(...)`
 - `@guard.enforce(...)`
 - `guard.RequireFact(...)`
-- `GuardError.to_prompt()`
+- `from actguard.exceptions import PolicyViolationError`
+- `PolicyViolationError.to_prompt()`
 
 ## Troubleshooting
 

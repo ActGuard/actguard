@@ -24,14 +24,16 @@ google.generativeai.GenerativeModel.generate_content_async  → actguard wrapper
 
 ```python
 import google.generativeai as genai
-from actguard import BudgetGuard
+from actguard import Client
 
 genai.configure(api_key="YOUR_API_KEY")
 model = genai.GenerativeModel("gemini-1.5-pro")
+ag = Client.from_env()
 
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    response = model.generate_content("Explain quantum computing.")
-    print(response.text)
+with ag.run(user_id="alice"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        response = model.generate_content("Explain quantum computing.")
+        print(response.text)
 
 print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
 ```
@@ -41,9 +43,10 @@ print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
 For streaming, actguard reads `usage_metadata` from the first chunk that carries it:
 
 ```python
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    for chunk in model.generate_content("Write a poem.", stream=True):
-        print(chunk.text, end="", flush=True)
+with ag.run(user_id="alice"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        for chunk in model.generate_content("Write a poem.", stream=True):
+            print(chunk.text, end="", flush=True)
 
 print(f"\n${guard.usd_used:.6f}")
 ```
@@ -53,14 +56,16 @@ print(f"\n${guard.usd_used:.6f}")
 ```python
 import asyncio
 import google.generativeai as genai
-from actguard import BudgetGuard
+from actguard import Client
 
 genai.configure(api_key="YOUR_API_KEY")
 model = genai.GenerativeModel("gemini-1.5-pro")
+ag = Client.from_env()
 
 async def main():
-    async with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-        response = await model.generate_content_async("Hello!")
+    async with ag.run(user_id="alice"):
+        async with ag.budget_guard(usd_limit=0.10) as guard:
+            response = await model.generate_content_async("Hello!")
     print(f"${guard.usd_used:.6f}")
 
 asyncio.run(main())

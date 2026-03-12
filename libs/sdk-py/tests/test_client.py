@@ -11,10 +11,10 @@ from actguard.core.budget_context import get_budget_state
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
 from actguard.exceptions import (
-    BudgetPaymentRequiredError,
+    ActGuardPaymentRequired,
     BudgetTransportError,
     MissingRuntimeContextError,
-    NestedRunContextError,
+    NestedRuntimeContextError,
 )
 
 
@@ -62,7 +62,7 @@ def test_nested_client_runs_raise_and_keep_outer_context():
         assert outer is not None
         assert outer.client is client_a
 
-        with pytest.raises(NestedRunContextError):
+        with pytest.raises(NestedRuntimeContextError):
             with client_b.run(run_id="inner"):
                 pass
 
@@ -291,7 +291,7 @@ def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
 
-    with pytest.raises(BudgetPaymentRequiredError) as excinfo:
+    with pytest.raises(ActGuardPaymentRequired) as excinfo:
         client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
 
     assert attempts["count"] == 1
@@ -324,7 +324,7 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
 
-    with pytest.raises(BudgetPaymentRequiredError) as excinfo:
+    with pytest.raises(ActGuardPaymentRequired) as excinfo:
         client.settle_budget(
             reserve_id="res-123",
             provider="openai",

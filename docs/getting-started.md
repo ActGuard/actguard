@@ -1,9 +1,10 @@
-# Getting Started
+# Getting started
 
 ## Requirements
 
 - Python 3.9+
-- At least one supported LLM SDK installed (see [Integrations](./integrations/openai.md))
+- At least one supported LLM SDK installed
+- Gateway config for reserve/settle-backed budget scopes, typically via `ACTGUARD_CONFIG`
 
 ## Install actguard
 
@@ -11,61 +12,93 @@
 pip install actguard
 ```
 
+## Create a client
+
+Use `Client` as the runtime entrypoint.
+
+```python
+from actguard import Client
+
+client = Client.from_env()
+# or
+client = Client.from_file("./actguard.json")
+```
+
+`ACTGUARD_CONFIG` can be either a base64-encoded JSON blob or a path to a JSON config file.
+
 ## Set a USD limit
 
-Stop spending as soon as a user's request crosses $0.05:
+Stop spending as soon as a run crosses $0.05:
 
 ```python
-from actguard import BudgetGuard, BudgetExceededError
 import openai
+from actguard import Client
+from actguard.exceptions import (
+    ActGuardPaymentRequired,
+    BudgetExceededError,
+    BudgetTransportError,
+)
 
-client = openai.OpenAI()
+ag = Client.from_env()
+oai = openai.OpenAI()
+
+guard = None
 
 try:
-    with BudgetGuard(user_id="alice", usd_limit=0.05) as guard:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Summarise the history of Rome."}],
-        )
-        print(response.choices[0].message.content)
+    with ag.run(user_id="alice"):
+        with ag.budget_guard(usd_limit=0.05) as g:
+            guard = g
+            response = oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Summarise the history of Rome."}],
+            )
+            print(response.choices[0].message.content)
 except BudgetExceededError as e:
     print(f"Budget hit: {e}")
+except ActGuardPaymentRequired as e:
+    print(f"Billing rejected reserve/settle: {e}")
+except BudgetTransportError as e:
+    print(f"Budget transport failed: {e}")
 finally:
-    print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
+    if guard is not None:
+        print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
 ```
 
-## Set a token limit
+## Nested budget scopes
+
+You can attach nested scopes to the same run:
 
 ```python
-with BudgetGuard(user_id="bob", token_limit=1_000) as guard:
-    ...
+with ag.run(user_id="alice"):
+    with ag.budget_guard(name="root", usd_limit=0.10) as root:
+        ...
+        with ag.budget_guard(name="search", usd_limit=0.02) as search:
+            ...
 ```
 
-## Set both limits
-
-Either limit triggers the error, whichever is hit first:
-
-```python
-with BudgetGuard(user_id="carol", token_limit=5_000, usd_limit=0.10) as guard:
-    ...
-```
+Root scopes expose root totals. Nested scopes expose local totals by default and also expose `root_tokens_used` / `root_usd_used`.
 
 ## Async usage
 
-`BudgetGuard` is also an async context manager:
+Both run scopes and budget scopes support `async with`:
 
 ```python
 import asyncio
 import openai
-from actguard import BudgetGuard
+from actguard import Client
 
 async def main():
-    client = openai.AsyncOpenAI()
-    async with BudgetGuard(user_id="dave", usd_limit=0.10) as guard:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
+    ag = Client.from_env()
+    oai = openai.AsyncOpenAI()
+
+    async with ag.run(user_id="dave"):
+        async with ag.budget_guard(usd_limit=0.10) as guard:
+            response = await oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Hello!"}],
+            )
+            print(response.choices[0].message.content)
+
     print(f"Used ${guard.usd_used:.4f}")
 
 asyncio.run(main())
@@ -73,75 +106,48 @@ asyncio.run(main())
 
 ## Streaming
 
-Streaming responses are fully supported. actguard wraps the iterator transparently and captures the usage chunk emitted at the end of the stream:
+Streaming responses are fully supported:
 
 ```python
-with BudgetGuard(user_id="eve", usd_limit=0.10) as guard:
-    stream = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "Tell me a story."}],
-        stream=True,
-    )
-    for chunk in stream:
-        if chunk.choices[0].delta.content:
-            print(chunk.choices[0].delta.content, end="", flush=True)
+with ag.run(user_id="eve"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        stream = oai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Tell me a story."}],
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                print(chunk.choices[0].delta.content, end="", flush=True)
 
 print(f"\nUsed ${guard.usd_used:.4f}")
 ```
 
-> **Note:** For streaming chat completions, actguard automatically injects
-> `stream_options={"include_usage": true}` into the request so the OpenAI SDK
-> returns a usage chunk. This is harmless to your code.
+For OpenAI chat-completions streams, ActGuard injects `stream_options={"include_usage": true}` so the final chunk includes usage data.
 
-## Configure actguard (optional)
+## Run-scoped decorators
 
-`actguard.configure()` wires in the ActGuard gateway so tool-guard checks can also be reported for global enforcement across processes. Decorators work with no configuration.
-
-Three ways to provide config:
-
-- **JSON file path**: pass a file containing `agent_id`, `gateway_url`, and `api_key`.
-- **Base64 JSON string**: pass a base64-encoded version of the same JSON.
-- **`ACTGUARD_CONFIG` env var**: set the variable and call `configure()` with no args.
+`max_attempts` and `idempotent` require an active `client.run(...)` context:
 
 ```python
-import os
 import actguard
-
-# From a JSON file
-actguard.configure("./actguard.json")
-
-# From a base64 env var
-actguard.configure(os.environ["ACTGUARD_CONFIG"])
-
-# Or read ACTGUARD_CONFIG directly
-actguard.configure()
-
-# Clear config
-actguard.configure(None)
-```
-
-## RunContext for runtime-state decorators
-
-`max_attempts` and `idempotent` rely on run-scoped state, so they require an active `RunContext`:
-
-```python
-from actguard import RunContext, max_attempts
+from actguard import max_attempts
 
 @max_attempts(calls=2)
 def lookup_customer(customer_id: str) -> dict:
     ...
 
-with RunContext(run_id="req-123"):
+client = actguard.Client.from_env()
+with client.run(run_id="req-123"):
     lookup_customer("cus_1")
     lookup_customer("cus_1")
 ```
 
 ## Rate-limit a tool
 
-Add a per-user rate limit to any tool function with a single decorator:
-
 ```python
-from actguard import rate_limit, RateLimitExceeded
+from actguard import rate_limit
+from actguard.exceptions import RateLimitExceeded
 
 @rate_limit(max_calls=5, period=60, scope="user_id")
 def send_email(user_id: str, subject: str) -> str:
@@ -153,14 +159,11 @@ except RateLimitExceeded as e:
     print(f"Slow down, retry in {e.retry_after:.0f}s")
 ```
 
-`scope="user_id"` means each distinct `user_id` gets its own counter. Omit `scope` for one global counter.
-
 ## Circuit-break a tool
 
-Add a dependency-health breaker so repeated infra failures short-circuit quickly:
-
 ```python
-from actguard import circuit_breaker, CircuitOpenError
+from actguard import circuit_breaker
+from actguard.exceptions import CircuitOpenError
 
 @circuit_breaker(name="postgres", max_fails=3, reset_timeout=60)
 def write_order(order_id: str) -> None:
@@ -174,10 +177,9 @@ except CircuitOpenError as e:
 
 ## Time-bound a tool
 
-Use `timeout` to bound wall-clock runtime for sync or async tools:
-
 ```python
-from actguard import timeout, ToolTimeoutError
+from actguard import timeout
+from actguard.exceptions import ToolTimeoutError
 
 @timeout(1.5)
 def call_slow_dependency() -> str:
@@ -191,23 +193,23 @@ except ToolTimeoutError as e:
 
 ## Deduplicate with idempotency keys
 
-Use `idempotent` to enforce at-most-once execution per `(tool, idempotency_key)` in a run:
-
 ```python
-from actguard import RunContext, idempotent
+import actguard
+from actguard import idempotent
 
 @idempotent(ttl_s=600)
 def create_invoice(user_id: str, amount_cents: int, *, idempotency_key: str) -> str:
     ...
 
-with RunContext():
+client = actguard.Client.from_env()
+with client.run(user_id="alice"):
     invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
     same_invoice_id = create_invoice("alice", 5000, idempotency_key="inv-42")
 ```
 
-## Chain-of-custody: session + prove + enforce + in-memory store
+## Chain-of-custody: session + prove + enforce
 
-`prove` and `enforce` use a chain-of-custody session, so they require `actguard.session(...)`:
+`prove` and `enforce` require an active `actguard.session(...)`:
 
 ```python
 import actguard
@@ -216,14 +218,13 @@ with actguard.session("req-123", {"user_id": "alice"}):
     ...
 ```
 
-Use `RunContext` for `max_attempts`/`idempotent`, and `session` for `prove`/`enforce`.
+Use `client.run(...)` for `max_attempts` / `idempotent`, and `actguard.session(...)` for `prove` / `enforce`.
 
 ## Prove then enforce in one flow
 
-Use `prove` on read tools to mint verified facts, then `enforce` on write tools:
-
 ```python
 import actguard
+from actguard.exceptions import PolicyViolationError
 
 @actguard.prove(kind="order_id", extract="id")
 def list_orders(user_id: str) -> list[dict]:
@@ -233,26 +234,18 @@ def list_orders(user_id: str) -> list[dict]:
 def delete_order(order_id: str) -> str:
     return f"deleted:{order_id}"
 
-with actguard.session("req-9", {"user_id": "alice"}):
-    list_orders("alice")
-    delete_order("o1")
+try:
+    with actguard.session("req-9", {"user_id": "alice"}):
+        list_orders("alice")
+        delete_order("o1")
+except PolicyViolationError as e:
+    print(e.to_prompt())
 ```
 
-If a write references an unproven id, `enforce` raises `GuardError` with code `MISSING_FACT`.
-
-## In-memory store behavior (local by default)
-
-- Runtime facts and guard state are stored in-memory in the current process.
-- State is ephemeral (not durable across process restarts).
-- For cross-process/global enforcement visibility, configure the ActGuard gateway.
-
-## Combine guards with @actguard.tool
-
-Use the unified decorator when you want one declaration:
+## Combine guards with `@actguard.tool`
 
 ```python
 import actguard
-from actguard import RunContext
 
 @actguard.tool(
     idempotent={"ttl_s": 600, "on_duplicate": "return"},
@@ -264,22 +257,14 @@ from actguard import RunContext
 def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
     ...
 
-with RunContext():
+client = actguard.Client.from_env()
+with client.run():
     search_web("alice", "latest earnings", idempotency_key="req-1")
 ```
 
-## Which guard should I use?
-
-- Use `rate_limit` to cap request volume per window.
-- Use `circuit_breaker` to stop hammering unhealthy dependencies.
-- Use `max_attempts` to cap retries/loops per run.
-- Use `timeout` to bound wall-clock latency.
-- Use `idempotent` to deduplicate side-effectful tools.
-- Use `prove` + `enforce` to require read-before-write chain-of-custody.
-
 ## What's next
 
-- [Core Concepts](./concepts.md) - understand how limits and isolation work
-- [Tool Guards](./tool-guards.md) - tool decorator behavior and framework integrations
-- [Integrations](./integrations/openai.md) - provider-specific requirements
-- [API Reference](./api-reference.md) - full parameter and exception reference
+- [Core concepts](./concepts.md)
+- [Tool guards](./tool-guards.md)
+- [Integrations](./integrations/openai.md)
+- [API reference](./api-reference.md)

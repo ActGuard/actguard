@@ -5,7 +5,13 @@ import time
 import pytest
 
 import actguard
-from actguard.exceptions import CircuitOpenError, GuardError, ToolTimeoutError
+from actguard.exceptions import (
+    CircuitOpenError,
+    GuardError,
+    MaxAttemptsExceeded,
+    RateLimitExceeded,
+    ToolTimeoutError,
+)
 
 
 @pytest.fixture()
@@ -109,7 +115,7 @@ def test_max_attempts_emits_guard_blocked_with_optional_user_id(client, emitted_
 
     with client.run(run_id="run-max-attempts"):
         assert once() == "ok"
-        with pytest.raises(actguard.MaxAttemptsExceeded):
+        with pytest.raises(MaxAttemptsExceeded):
             once()
 
     blocked = _find_events(emitted_events, category="guard", name="blocked")
@@ -166,7 +172,7 @@ def test_rate_limit_emits_guard_blocked(client, emitted_events):
 
     with client.run(run_id="run-rate", user_id="alice"):
         assert fn("alice") == "alice"
-        with pytest.raises(actguard.RateLimitExceeded):
+        with pytest.raises(RateLimitExceeded):
             fn("alice")
 
     blocked = _find_events(emitted_events, category="guard", name="blocked")

@@ -108,13 +108,13 @@ def _emit_tool_invoke(tool_name: str) -> None:
 
 
 def _emit_tool_error(tool_name: str, exc: Exception) -> None:
-    from actguard.exceptions import ActGuardViolation, ToolGuardError
+    from actguard.exceptions import ActGuardError, ActGuardToolError
 
     # Guard decorators emit guard.blocked / guard.intervention directly.
-    if isinstance(exc, ToolGuardError):
+    if isinstance(exc, ActGuardToolError):
         return
-    # ActGuardViolation has its own emit_violation path.
-    if isinstance(exc, ActGuardViolation):
+    # Reportable ActGuard errors have their own emit_violation path.
+    if isinstance(exc, ActGuardError) and exc.is_reportable:
         return
 
     emit_tool_failure(tool_name, exc)

@@ -11,7 +11,6 @@ import pytest
 import actguard
 import actguard.integrations.anthropic as _ant_mod
 import actguard.integrations.openai as _oai_mod
-from actguard import BudgetConfigurationError, BudgetExceededError
 from actguard.core.budget_context import (
     _active_budget_contexts,
     _active_budget_states,
@@ -26,7 +25,11 @@ from actguard.core.budget_context import (
 )
 from actguard.core.pricing import get_cost
 from actguard.core.state import get_current_state
-from actguard.exceptions import MissingRuntimeContextError
+from actguard.exceptions import (
+    BudgetConfigurationError,
+    BudgetExceededError,
+    MissingRuntimeContextError,
+)
 
 
 # ---------------------------------------------------------------------------

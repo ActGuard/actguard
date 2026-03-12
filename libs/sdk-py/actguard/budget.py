@@ -12,6 +12,8 @@ from actguard.core.budget_context import (
     push_budget_scope,
 )
 from actguard.exceptions import (
+    ActGuardRuntimeContextError,
+    ActGuardUsageError,
     BudgetClientMismatchError,
     BudgetConfigurationError,
 )
@@ -65,8 +67,11 @@ class BudgetGuard:
             self._requested_run_id is not None
             and active.run_id != self._requested_run_id
         ):
-            raise ValueError(
-                "budget_guard run_id does not match active runtime run_id."
+            raise ActGuardRuntimeContextError(
+                "budget_guard run_id does not match active runtime run_id.",
+                code="runtime.run_id_mismatch",
+                reason="budget_run_id_mismatch",
+                retryable=False,
             )
         if active.client is not None and active.client is not self._client:
             raise BudgetClientMismatchError()
@@ -153,7 +158,12 @@ class BudgetGuard:
 
     def __enter__(self) -> "BudgetGuard":
         if self.usd_limit is not None and self.usd_limit <= 0:
-            raise ValueError("budget_guard requires usd_limit > 0 when provided.")
+            raise ActGuardUsageError(
+                "budget_guard requires usd_limit > 0 when provided.",
+                code="usage.budget_guard_configuration",
+                reason="budget_guard_configuration",
+                retryable=False,
+            )
 
         active_user_id = self._bind_run_state()
         patch_all()

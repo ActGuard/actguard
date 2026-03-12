@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from actguard.events.catalog import SIGNIFICANT, VERBOSE
+from actguard.exceptions import ReportingContractError
 from actguard.reporting_contract import (
     ATTRIBUTED_METRICS,
     CANONICAL_USAGE_EVENT,
@@ -37,7 +38,7 @@ def test_only_llm_usage_rows_are_attributed_spend_events():
 
 
 def test_unknown_reporting_metric_raises():
-    with pytest.raises(KeyError):
+    with pytest.raises(ReportingContractError):
         metric_source("mystery_metric")
 
 

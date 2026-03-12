@@ -1,114 +1,106 @@
-# Core Concepts
+# Core concepts
 
-## BudgetGuard
+## Runtime model
 
-`BudgetGuard` is a context manager that tracks cumulative token and USD usage for every LLM call made inside its `with` block.
+ActGuard has two distinct runtime scopes:
 
-```python
-from actguard import BudgetGuard
+- `client.run(...)` for run-scoped state such as `max_attempts`, `idempotent`, and runtime event attribution
+- `client.budget_guard(...)` for spend tracking and reserve/settle-backed budget enforcement inside an active run
 
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    # all LLM calls here are tracked
-    ...
+Chain-of-custody uses a separate session scope:
 
-# guard.tokens_used and guard.usd_used are available after exit
-```
+- `actguard.session(...)` for `prove` and `enforce`
 
-### Parameters
+## Client and run scope
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `user_id` | `str` | Identifier for the budget owner. Included in `BudgetExceededError` messages. |
-| `token_limit` | `int \| None` | Max total tokens (input + output). `None` means no limit. |
-| `usd_limit` | `float \| None` | Max total USD cost. `None` means no limit. |
-
-At least one limit is recommended. If both are `None`, actguard still tracks usage, but never raises.
-
-### Post-context properties
-
-After the `with` block exits, `guard.tokens_used` and `guard.usd_used` are still readable:
+`Client` is the entrypoint for runtime-scoped behavior.
 
 ```python
-with BudgetGuard(user_id="alice", usd_limit=1.00) as guard:
-    ...
+from actguard import Client
 
-print(guard.tokens_used)  # total tokens consumed
-print(guard.usd_used)     # total USD cost
+client = Client.from_env()
+
+with client.run(user_id="alice", run_id="req-123") as run:
+    print(run.run_id)
 ```
 
----
+Run scope stores:
 
-## Limits
+- attempt counters for `max_attempts`
+- idempotency records for `idempotent`
+- run metadata used by reporting and exceptions
 
-### How limits are checked
+If `max_attempts`, `idempotent`, or `budget_guard` runs without an active run scope, ActGuard raises `MissingRuntimeContextError`.
 
-Limits are checked **before and after** every LLM call:
+## Budget scope
 
-1. **Pre-check** — if the accumulated usage already meets or exceeds the limit at the start of a call, `BudgetExceededError` is raised immediately. The SDK call is never made.
-2. **Post-check** — after the response (or stream) is fully read, usage is added and the limit is checked again.
+`client.budget_guard(...)` creates a client-bound `BudgetGuard` inside an active run:
 
-This means the error is raised at the earliest detectable moment. For a non-streaming call, that's synchronously on return. For a streaming call, it's after the final usage chunk is yielded.
+```python
+with client.run(user_id="alice"):
+    with client.budget_guard(name="root", usd_limit=0.10) as guard:
+        ...
+```
 
-### Token counting
+### What it tracks
 
-Tokens are counted as `input_tokens + output_tokens` reported by the provider. The exact fields vary by provider — actguard normalises them internally.
+- provider/model attribution
+- input, cached-input, and output tokens
+- cumulative USD spend
+- reserve/settle state for the root scope
 
-### USD cost
+### Limits
 
-USD cost is computed from a built-in pricing table keyed by provider and model name. If a model is not in the table, cost is recorded as `$0.00` and a `UserWarning` is emitted. You can open an issue or PR to add missing models.
+The current SDK enforces USD budgets. `BudgetExceededError.limit_type` is `"usd"`.
 
----
+### Root and nested scopes
+
+Nested budget scopes share the same run-level reserve but keep local totals:
+
+```python
+with client.run(user_id="alice"):
+    with client.budget_guard(name="root", usd_limit=0.10) as root:
+        ...
+        with client.budget_guard(name="search", usd_limit=0.02) as nested:
+            ...
+```
+
+- root scopes expose aggregate totals through `tokens_used` / `usd_used`
+- nested scopes expose local totals through `tokens_used` / `usd_used`
+- both expose `root_tokens_used` / `root_usd_used`
+
+## Budget lifecycle
+
+For a root scope, ActGuard:
+
+1. validates there is an active `client.run(...)`
+2. patches supported provider transports
+3. reserves budget on enter
+4. records usage during model calls
+5. settles budget on exit
+
+Missing gateway credentials raise `BudgetTransportError`. A 402 from the budget API raises `ActGuardPaymentRequired`.
+
+## Patching
+
+Budget scopes call the provider patchers on entry. The patching is idempotent and transparent:
+
+- with no active budget scope, patched SDK methods behave like the originals
+- while a budget scope is active, usage is captured from non-streaming and streaming responses
+
+See [Integrations](./integrations/openai.md) for provider-specific transport behavior.
 
 ## Context isolation
 
-Budget state lives in a [`ContextVar`](https://docs.python.org/3/library/contextvars.html). This gives strong isolation guarantees:
+ActGuard stores runtime state in `ContextVar`-backed scopes.
 
-- **Threads** — each thread has its own context; concurrent guards don't bleed into each other.
-- **Async tasks** — each `asyncio` task inherits a copy of the context at creation time. A guard started in one task is invisible to a sibling task.
-- **Nested guards** — inner guards don't inherit the outer guard's accumulated totals.
-
-```python
-with BudgetGuard(user_id="outer", usd_limit=1.00) as outer:
-    call_llm()  # counted toward outer
-
-    with BudgetGuard(user_id="inner", usd_limit=0.05) as inner:
-        call_llm()  # counted toward inner only
-
-    # outer still tracks its own calls; inner's usage is isolated
-```
-
----
-
-## Tool runtime context
-
-`RunContext` provides per-run state for tool decorators that need cross-call memory.
-
-```python
-from actguard import RunContext
-
-with RunContext(run_id="req-123"):
-    ...
-```
-
-### What state is stored
-
-- Attempt counters per tool (`max_attempts`)
-- Idempotency records per `(tool_id, idempotency_key)` (`idempotent`)
-- Run identifier used by related exceptions
-
-### Isolation semantics
-
-- **Per run**: a new `RunContext` starts with fresh attempt counters and idempotency state.
-- **Nested contexts**: inner `RunContext` has independent state; on exit, outer state is restored.
-- **Async support**: `RunContext` supports `with` and `async with`.
-
-`timeout` does not require `RunContext`, but if one is active it includes `run_id` in `ToolTimeoutError`.
-
----
+- thread and task isolation prevent unrelated runs from sharing budget or tool state
+- run scope isolates attempt counters and idempotency records per run
+- session scope isolates verified facts by session id and scope hash
 
 ## Chain-of-custody session
 
-`session` provides chain-of-custody state for `prove` and `enforce`.
+`actguard.session(...)` provides the state required by `prove` and `enforce`:
 
 ```python
 import actguard
@@ -117,50 +109,29 @@ with actguard.session("req-123", {"user_id": "u1"}):
     ...
 ```
 
-### What state is stored
+Session scope stores:
 
-- Verified facts minted by `@prove`
-- Session id and scope dimensions used to isolate fact visibility
+- verified facts minted by `@prove`
+- session id and scope dimensions used for visibility checks
 
-### Isolation semantics
+Without an active session, `prove` and `enforce` raise `PolicyViolationError` with code `NO_SESSION`.
 
-- **Per session**: facts minted in session A are not visible in session B.
-- **Per scope**: scope dimensions (for example user id) affect fact visibility.
-- **Async support**: `session` supports both `with` and `async with`.
+## Runtime exception shape
 
-### Storage behavior
-
-- State is in-memory and process-local.
-- State is ephemeral and cleared on process restart.
-- This local store is suitable for single-process agents; gateway reporting is used for global visibility.
-
----
-
-## Patching
-
-`BudgetGuard.__enter__()` calls `patch_all()` once per process, which monkey-patches the transport layer of each installed LLM SDK. The patch is idempotent — calling it multiple times has no effect.
-
-The patch is **transparent**: if no `BudgetGuard` is active in the current context, patched methods behave exactly like the originals.
-
-See the [Integrations](./integrations/openai.md) section for provider-specific details and version requirements.
-
----
-
-## BudgetExceededError
-
-Raised when a limit is hit. Inherits from `Exception`.
+Concrete guard/runtime exceptions live under `actguard.exceptions`.
 
 ```python
-from actguard import BudgetExceededError
+from actguard.exceptions import BudgetExceededError
 
 try:
-    with BudgetGuard(user_id="alice", usd_limit=0.01) as guard:
-        client.chat.completions.create(...)
+    with client.run(user_id="alice"):
+        with client.budget_guard(usd_limit=0.01):
+            client_llm_call(...)
 except BudgetExceededError as e:
-    print(e.limit_type)    # "token" or "usd"
+    print(e.limit_type)  # "usd"
     print(e.tokens_used)
     print(e.usd_used)
     print(e.usd_limit)
 ```
 
-Full attribute reference: [API Reference → BudgetExceededError](./api-reference.md#budgetexceedederror).
+Full details live in the [API reference](./api-reference.md).

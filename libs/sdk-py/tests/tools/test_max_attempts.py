@@ -6,9 +6,11 @@ import pytest
 
 import actguard
 from actguard.exceptions import (
+    ActGuardToolError,
     MaxAttemptsExceeded,
+    MaxAttemptsConfigurationError,
     MissingRuntimeContextError,
-    NestedRunContextError,
+    NestedRuntimeContextError,
 )
 from actguard.tools.max_attempts import max_attempts
 
@@ -262,12 +264,12 @@ def test_missing_runtime_context_error_message():
     assert "client.run" in str(exc_info.value)
 
 
-def test_missing_runtime_context_error_is_tool_guard_error():
-    from actguard.exceptions import ToolGuardError
-
+def test_missing_runtime_context_error_is_not_a_tool_error():
     fn = _make_fn(5)
-    with pytest.raises(ToolGuardError):
+    with pytest.raises(MissingRuntimeContextError) as exc_info:
         fn()
+
+    assert not isinstance(exc_info.value, ActGuardToolError)
 
 
 # ---------------------------------------------------------------------------
@@ -368,23 +370,23 @@ def test_client_run_run_id_in_exception():
 # ---------------------------------------------------------------------------
 
 
-def test_calls_zero_raises_value_error():
-    with pytest.raises(ValueError, match="calls must be an integer"):
+def test_calls_zero_raises_configuration_error():
+    with pytest.raises(MaxAttemptsConfigurationError, match="calls must be an integer"):
         max_attempts(calls=0)
 
 
-def test_calls_negative_raises_value_error():
-    with pytest.raises(ValueError, match="calls must be an integer"):
+def test_calls_negative_raises_configuration_error():
+    with pytest.raises(MaxAttemptsConfigurationError, match="calls must be an integer"):
         max_attempts(calls=-1)
 
 
-def test_calls_float_raises_value_error():
-    with pytest.raises(ValueError, match="calls must be an integer"):
+def test_calls_float_raises_configuration_error():
+    with pytest.raises(MaxAttemptsConfigurationError, match="calls must be an integer"):
         max_attempts(calls=1.5)
 
 
-def test_calls_bool_raises_value_error():
-    with pytest.raises(ValueError, match="calls must be an integer"):
+def test_calls_bool_raises_configuration_error():
+    with pytest.raises(MaxAttemptsConfigurationError, match="calls must be an integer"):
         max_attempts(calls=True)
 
 
@@ -428,7 +430,7 @@ def test_nested_runs_raise_and_outer_state_stays_active():
 
     with _CLIENT.run():
         assert fn() == "ok"
-        with pytest.raises(NestedRunContextError):
+        with pytest.raises(NestedRuntimeContextError):
             with _CLIENT.run():
                 pass
         with pytest.raises(MaxAttemptsExceeded):
@@ -443,17 +445,17 @@ def test_nested_runs_raise_and_outer_state_stays_active():
 def test_public_imports():
     assert not hasattr(actguard, "RunContext")
     assert hasattr(actguard, "max_attempts")
-    assert hasattr(actguard, "MaxAttemptsExceeded")
-    assert hasattr(actguard, "MissingRuntimeContextError")
-    assert hasattr(actguard, "NestedRunContextError")
+    assert hasattr(actguard, "ActGuardError")
+    assert hasattr(actguard, "ActGuardToolError")
+    assert hasattr(actguard, "ActGuardPaymentRequired")
 
 
 def test_max_attempts_exceeded_in_all():
-    assert "MaxAttemptsExceeded" in actguard.__all__
+    assert "ActGuardToolError" in actguard.__all__
 
 
 def test_missing_runtime_context_error_in_all():
-    assert "MissingRuntimeContextError" in actguard.__all__
+    assert "ActGuardError" in actguard.__all__
 
 
 def test_run_context_in_all():
@@ -461,7 +463,7 @@ def test_run_context_in_all():
 
 
 def test_nested_run_context_error_in_all():
-    assert "NestedRunContextError" in actguard.__all__
+    assert "ActGuardPaymentRequired" in actguard.__all__
 
 
 def test_max_attempts_in_all():

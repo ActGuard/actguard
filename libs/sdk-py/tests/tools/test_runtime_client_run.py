@@ -9,6 +9,7 @@ from actguard.core.run_context import get_run_state
 from actguard.exceptions import (
     MaxAttemptsExceeded,
     MissingRuntimeContextError,
+    RateLimitExceeded,
     ToolTimeoutError,
 )
 from actguard.tools.idempotent import idempotent
@@ -90,7 +91,7 @@ def test_rate_limit_reports_active_run_context_inside_client_run():
 
     with client.run(run_id="run-rate"):
         assert fn() == "ok"
-        with pytest.raises(actguard.RateLimitExceeded):
+        with pytest.raises(RateLimitExceeded):
             fn()
 
     matches = [

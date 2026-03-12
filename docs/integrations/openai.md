@@ -34,16 +34,18 @@ Every OpenAI API surface (Chat Completions, Responses API, Embeddings, etc.) rou
 
 ```python
 import openai
-from actguard import BudgetGuard
+from actguard import Client
 
-client = openai.OpenAI()
+ag = Client.from_env()
+oai = openai.OpenAI()
 
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "Explain async/await in Python."}],
-    )
-    print(response.choices[0].message.content)
+with ag.run(user_id="alice"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        response = oai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Explain async/await in Python."}],
+        )
+        print(response.choices[0].message.content)
 
 print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
 ```
@@ -53,15 +55,16 @@ print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
 For streaming, actguard automatically injects `stream_options={"include_usage": true}` into chat completion requests so the final chunk includes usage data. This injection only applies to `/chat/completions` endpoints and is harmless to existing code.
 
 ```python
-with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-    stream = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "Write a haiku."}],
-        stream=True,
-    )
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        print(delta, end="", flush=True)
+with ag.run(user_id="alice"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        stream = oai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Write a haiku."}],
+            stream=True,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            print(delta, end="", flush=True)
 
 print(f"\n${guard.usd_used:.6f}")
 ```
@@ -71,16 +74,18 @@ print(f"\n${guard.usd_used:.6f}")
 ```python
 import asyncio
 import openai
-from actguard import BudgetGuard
+from actguard import Client
 
-client = openai.AsyncOpenAI()
+ag = Client.from_env()
+oai = openai.AsyncOpenAI()
 
 async def main():
-    async with BudgetGuard(user_id="alice", usd_limit=0.10) as guard:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
+    async with ag.run(user_id="alice"):
+        async with ag.budget_guard(usd_limit=0.10) as guard:
+            response = await oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Hello!"}],
+            )
     print(f"${guard.usd_used:.6f}")
 
 asyncio.run(main())
@@ -92,7 +97,7 @@ The Responses API is also tracked. Usage is read from the `response.completed` e
 
 ## Version warning
 
-If you have an older OpenAI SDK installed, actguard emits a warning when `patch_openai()` runs (i.e., the first time you enter a `BudgetGuard`):
+If you have an older OpenAI SDK installed, actguard emits a warning when patching runs (i.e., the first time you enter a budget scope):
 
 ```
 UserWarning: actguard requires openai>=1.76.0; detected 1.50.0.

@@ -11,6 +11,8 @@ import pytest
 import actguard
 from actguard.exceptions import (
     ActGuardError,
+    ActGuardToolError,
+    TimeoutUsageError,
     ToolExecutionError,
     ToolTimeoutError,
 )
@@ -141,7 +143,7 @@ def test_context_propagation_to_sync_tool():
 
 
 def test_generator_function_rejected_at_decoration():
-    with pytest.raises(TypeError, match="generator"):
+    with pytest.raises(TimeoutUsageError, match="generator"):
 
         @timeout(1.0)
         def gen():
@@ -162,7 +164,7 @@ def test_generator_returned_at_runtime_raises_type_error():
 
     guarded = timeout(1.0)(returns_gen)
 
-    with pytest.raises(TypeError, match="generator"):
+    with pytest.raises(TimeoutUsageError, match="generator"):
         guarded()
 
 
@@ -172,7 +174,7 @@ def test_generator_returned_at_runtime_raises_type_error():
 
 
 def test_async_generator_rejected_at_decoration():
-    with pytest.raises(TypeError, match="generator"):
+    with pytest.raises(TimeoutUsageError, match="generator"):
 
         @timeout(1.0)
         async def agen():
@@ -317,6 +319,7 @@ def test_exception_hierarchy():
     err = ToolTimeoutError("my_tool", 5.0)
     assert isinstance(err, ToolTimeoutError)
     assert isinstance(err, ToolExecutionError)
+    assert isinstance(err, ActGuardToolError)
     assert isinstance(err, ActGuardError)
 
 
@@ -343,14 +346,14 @@ def test_tool_timeout_error_no_run_id():
 def test_public_exports():
     assert hasattr(actguard, "timeout")
     assert hasattr(actguard, "shutdown")
-    assert hasattr(actguard, "ToolTimeoutError")
-    assert hasattr(actguard, "ToolExecutionError")
     assert hasattr(actguard, "ActGuardError")
+    assert hasattr(actguard, "ActGuardToolError")
+    assert hasattr(actguard, "ActGuardPaymentRequired")
 
 
 def test_public_all_contains_new_symbols():
     assert "timeout" in actguard.__all__
     assert "shutdown" in actguard.__all__
-    assert "ToolTimeoutError" in actguard.__all__
-    assert "ToolExecutionError" in actguard.__all__
     assert "ActGuardError" in actguard.__all__
+    assert "ActGuardToolError" in actguard.__all__
+    assert "ActGuardPaymentRequired" in actguard.__all__

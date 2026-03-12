@@ -21,16 +21,16 @@ uv add actguard
 | Skipped workflow steps | Performs side effect before required step | ✅ |
 | Obeying malicious input | Untrusted text tells it to do something destructive | ✅ |
 
-## Set a spending or token limit (`client.budget_guard`)
+## Set a spending limit (`client.budget_guard`)
 
 Stop spending as soon as a user's request crosses $0.05:
 
 ```python
-from actguard import (
+from actguard import Client
+from actguard.exceptions import (
+    ActGuardPaymentRequired,
     BudgetExceededError,
-    BudgetPaymentRequiredError,
     BudgetTransportError,
-    Client,
 )
 import openai
 
@@ -39,16 +39,17 @@ oai = openai.OpenAI()
 guard = None
 
 try:
-    with ag.budget_guard(user_id="alice", usd_limit=0.05) as g:
-        guard = g
-        response = oai.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Summarise the history of Rome."}],
-        )
-        print(response.choices[0].message.content)
+    with ag.run(user_id="alice"):
+        with ag.budget_guard(usd_limit=0.05) as g:
+            guard = g
+            response = oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Summarise the history of Rome."}],
+            )
+            print(response.choices[0].message.content)
 except BudgetExceededError as e:
     print(f"Budget hit: {e}")
-except BudgetPaymentRequiredError as e:
+except ActGuardPaymentRequired as e:
     print(f"Billing rejected reserve/settle: {e}")
 except BudgetTransportError as e:
     print(f"Budget transport failed: {e}")
@@ -63,11 +64,13 @@ and settles on exit (`POST /api/v1/settle`) with your configured API key.
 Set different USD limits for different scopes:
 
 ```python
-with ag.budget_guard(user_id="bob", usd_limit=0.02) as guard:
-    ...
+with ag.run(user_id="bob"):
+    with ag.budget_guard(usd_limit=0.02) as guard:
+        ...
 
-with ag.budget_guard(user_id="carol", usd_limit=0.10) as guard:
-    ...
+with ag.run(user_id="carol"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        ...
 ```
 
 You can also layer budget scope on a run scope:
@@ -88,11 +91,12 @@ from actguard import Client
 async def main():
     ag = Client.from_file("./actguard.json")
     oai = openai.AsyncOpenAI()
-    async with ag.budget_guard(user_id="dave", usd_limit=0.10) as guard:
-        response = await oai.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
+    async with ag.run(user_id="dave"):
+        async with ag.budget_guard(usd_limit=0.10) as guard:
+            response = await oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Hello!"}],
+            )
     print(f"Used ${guard.usd_used:.4f}")
 
 asyncio.run(main())
@@ -101,15 +105,16 @@ asyncio.run(main())
 Streaming responses are fully supported — actguard wraps the iterator transparently and captures the usage chunk emitted at the end of the stream:
 
 ```python
-with ag.budget_guard(user_id="eve", usd_limit=0.10) as guard:
-    stream = oai.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "Tell me a story."}],
-        stream=True,
-    )
-    for chunk in stream:
-        if chunk.choices[0].delta.content:
-            print(chunk.choices[0].delta.content, end="", flush=True)
+with ag.run(user_id="eve"):
+    with ag.budget_guard(usd_limit=0.10) as guard:
+        stream = oai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Tell me a story."}],
+            stream=True,
+        )
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                print(chunk.choices[0].delta.content, end="", flush=True)
 
 print(f"\nUsed ${guard.usd_used:.4f}")
 ```
@@ -119,7 +124,8 @@ print(f"\nUsed ${guard.usd_used:.4f}")
 Add a per-user rate limit to any tool function with a single decorator:
 
 ```python
-from actguard import rate_limit, RateLimitExceeded
+from actguard import rate_limit
+from actguard.exceptions import RateLimitExceeded
 
 @rate_limit(max_calls=5, period=60, scope="user_id")
 def send_email(user_id: str, subject: str) -> str:
@@ -138,7 +144,8 @@ except RateLimitExceeded as e:
 Add a dependency-health breaker so repeated infra failures short-circuit quickly:
 
 ```python
-from actguard import circuit_breaker, CircuitOpenError
+from actguard import circuit_breaker
+from actguard.exceptions import CircuitOpenError
 
 @circuit_breaker(name="postgres", max_fails=3, reset_timeout=60)
 def write_order(order_id: str) -> None:
@@ -155,7 +162,8 @@ except CircuitOpenError as e:
 Use `timeout` to bound wall-clock runtime for sync or async tools:
 
 ```python
-from actguard import timeout, ToolTimeoutError
+from actguard import timeout
+from actguard.exceptions import ToolTimeoutError
 
 @timeout(1.5)
 def call_slow_dependency() -> str:
@@ -221,7 +229,7 @@ with actguard.session("req-9", {"user_id": "alice"}):
     delete_order("o1")
 ```
 
-If a write references an unproven id, `enforce` raises `GuardError` with code `MISSING_FACT`.
+If a write references an unproven id, `enforce` raises `PolicyViolationError` with code `MISSING_FACT`.
 
 `prove`/`enforce` use a chain-of-custody session, so they require `actguard.session(...)`. Use `client.run(...)` for `max_attempts`/`idempotent`.
 

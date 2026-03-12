@@ -368,17 +368,13 @@ def test_state_resets_between_runs():
 
 def test_public_imports():
     assert hasattr(actguard, "idempotent")
-    assert hasattr(actguard, "InvalidIdempotentToolError")
-    assert hasattr(actguard, "MissingIdempotencyKeyError")
-    assert hasattr(actguard, "IdempotencyInProgress")
-    assert hasattr(actguard, "DuplicateIdempotencyKey")
-    assert hasattr(actguard, "IdempotencyOutcomeUnknown")
+    assert hasattr(actguard, "ActGuardError")
+    assert hasattr(actguard, "ActGuardToolError")
+    assert hasattr(actguard, "ActGuardPaymentRequired")
 
 
 def test_new_symbols_in_all():
     assert "idempotent" in actguard.__all__
-    assert "InvalidIdempotentToolError" in actguard.__all__
-    assert "MissingIdempotencyKeyError" in actguard.__all__
-    assert "IdempotencyInProgress" in actguard.__all__
-    assert "DuplicateIdempotencyKey" in actguard.__all__
-    assert "IdempotencyOutcomeUnknown" in actguard.__all__
+    assert "ActGuardError" in actguard.__all__
+    assert "ActGuardToolError" in actguard.__all__
+    assert "ActGuardPaymentRequired" in actguard.__all__

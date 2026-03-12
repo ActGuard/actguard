@@ -5,7 +5,7 @@ import json
 import pytest
 
 import actguard
-from actguard.exceptions import RateLimitExceeded
+from actguard.exceptions import RateLimitExceeded, ScopeValidationError
 from actguard.tools.rate_limit import rate_limit
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ def test_scope_different_users_independent():
 
 
 def test_invalid_scope_raises_at_decoration_time():
-    with pytest.raises(ValueError, match="scope="):
+    with pytest.raises(ScopeValidationError, match="scope="):
 
         @rate_limit(max_calls=5, period=60, scope="nonexistent_param")
         def fn(user_id: str):

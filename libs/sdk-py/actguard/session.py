@@ -1,5 +1,6 @@
 from typing import Dict, Optional, Tuple
 
+from actguard.exceptions import SessionUsageError
 from actguard.tools._scope import reset_session, set_session
 
 
@@ -11,7 +12,7 @@ class GuardSession:
         self.scope = scope or {}
         for key, value in self.scope.items():
             if not isinstance(value, str):
-                raise TypeError(
+                raise SessionUsageError(
                     f"Scope values must be strings, got {type(value)} for key {key!r}"
                 )
         self._tokens: Optional[Tuple] = None

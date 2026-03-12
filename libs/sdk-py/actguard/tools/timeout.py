@@ -10,7 +10,7 @@ import os
 import threading
 from concurrent.futures import Executor, ThreadPoolExecutor
 
-from ..exceptions import ToolTimeoutError
+from ..exceptions import TimeoutUsageError, ToolTimeoutError
 from ._observability import emit_guard_intervention
 
 log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def timeout(seconds: float, executor: Executor | None = None):
 
     def decorator(fn):
         if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
-            raise TypeError(
+            raise TimeoutUsageError(
                 f"@timeout does not support generator functions: {fn.__qualname__}"
             )
 
@@ -119,7 +119,7 @@ def timeout(seconds: float, executor: Executor | None = None):
                 try:
                     result = future.result(timeout=seconds)
                     if inspect.isgenerator(result):
-                        raise TypeError(
+                        raise TimeoutUsageError(
                             f"@timeout: tool '{tool_name}' returned a generator;"
                             " streaming not supported"
                         )

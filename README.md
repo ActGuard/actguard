@@ -5,13 +5,13 @@ ActGuard validates agent behavior over time.
 ## Why use this
 
 Your code validates what is being done.
-ActGuard validates whether it should be done, given how we got here.
+ActGuard validates whether it should be done, given how the agent got there.
 
-Traditional checks handle one call at a time. Agent failures often happen across calls: wrong IDs carried between steps, retry loops, and budget drift over a session.
+Traditional checks handle one call at a time. Agent failures often happen across calls: wrong IDs carried between steps, retry loops, and budget drift over a run.
 
-## Static Logic vs Dynamic Workflow Integrity
+## Static logic vs dynamic workflow integrity
 
-| Concern | Solve With |
+| Concern | Solve with |
 |---|---|
 | Is the input valid? | `if/else` |
 | Is the caller authorized? | RBAC / Auth |
@@ -19,36 +19,46 @@ Traditional checks handle one call at a time. Agent failures often happen across
 | Did the agent hallucinate the ID? | ActGuard |
 | Did required steps happen before this action? | ActGuard |
 | Is the agent retrying in a loop? | ActGuard |
-| Is the session within cost budget? | ActGuard |
+| Is the run within cost budget? | ActGuard |
 
 ## Primary use cases
 
-### 1) BudgetGuard: keep session cost bounded
+### 1) Bound spend with `Client.run(...)` + `client.budget_guard(...)`
 
 ```python
-from actguard import BudgetGuard, BudgetExceededError
 import openai
+from actguard import Client
+from actguard.exceptions import (
+    ActGuardPaymentRequired,
+    BudgetExceededError,
+    BudgetTransportError,
+)
 
-client = openai.OpenAI()
+ag = Client.from_env()
+oai = openai.OpenAI()
 
 try:
-    with BudgetGuard(user_id="alice", usd_limit=0.05) as guard:
-        client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "Summarize this ticket thread."}],
-        )
+    with ag.run(user_id="alice"):
+        with ag.budget_guard(usd_limit=0.05) as guard:
+            oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Summarize this ticket thread."}],
+            )
 except BudgetExceededError:
-    # stop or downgrade model/tooling for this session
+    pass
+except ActGuardPaymentRequired:
+    pass
+except BudgetTransportError:
     pass
 ```
 
-This protects you from silent cost drift when an agent keeps exploring, retrying, or over-calling models.
+This protects you from silent cost drift when an agent keeps exploring, retrying, or over-calling models. Budget scopes reserve on entry and settle on exit, so they require a configured `Client` with gateway credentials.
 
-### 2) prove/enforce: validate the journey, not just the input
+### 2) Prove/enforce: validate the journey, not just the input
 
 ```python
 import actguard
-from actguard.exceptions import GuardError
+from actguard.exceptions import PolicyViolationError
 
 @actguard.prove(kind="order_id", extract="id")
 def list_orders(user_id: str) -> list[dict]:
@@ -62,28 +72,25 @@ try:
     with actguard.session("req-123", {"user_id": "alice"}):
         list_orders("alice")
         cancel_order("o1")
-except GuardError as e:
+except PolicyViolationError as e:
     hint_for_llm = e.to_prompt()
-    # Feed hint_for_llm back to the agent so it can fix its plan.
 ```
 
 This blocks actions that look valid by input but are invalid for the session journey.
-`e.to_prompt()` returns actionable context the LLM can use to self-correct.
 
-## Secondary guards (complementary controls)
+## Secondary guards
 
 After budget and workflow-integrity controls, these decorators cover common runtime guardrails:
 
 - `rate_limit`: cap call volume in a time window
 - `circuit_breaker`: stop hammering unhealthy dependencies
-- `max_attempts`: cap retries/attempts per run
+- `max_attempts`: cap retries per run
 - `timeout`: bound wall-clock execution time
 - `idempotent`: deduplicate side-effectful operations
 - `tool(...)`: compose multiple guards in one declaration
 
 ```python
 import actguard
-from actguard import RunContext
 
 @actguard.tool(
     idempotent={"ttl_s": 600, "on_duplicate": "return"},
@@ -95,7 +102,8 @@ from actguard import RunContext
 def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
     ...
 
-with RunContext():
+client = actguard.Client.from_env()
+with client.run(user_id="alice"):
     search_web("alice", "latest earnings", idempotency_key="req-1")
 ```
 
@@ -107,19 +115,19 @@ pip install actguard
 
 ## Python SDK quick links
 
-- [Getting Started](./docs/getting-started.md)
-- [Tool Guards](./docs/tool-guards.md)
-- [API Reference](./docs/api-reference.md)
+- [Getting started](./docs/getting-started.md)
+- [Tool guards](./docs/tool-guards.md)
+- [API reference](./docs/api-reference.md)
 
-## Repository structure (brief)
+## Repository structure
 
-```
+```text
 actguard/
-├── docs/           # Documentation
-├── examples/       # Usage examples
+├── docs/
+├── examples/
 └── libs/
-    ├── sdk-py/     # Python SDK
-    └── sdk-js/     # JavaScript/Node.js SDK
+    ├── sdk-py/
+    └── sdk-js/
 ```
 
 ## Development

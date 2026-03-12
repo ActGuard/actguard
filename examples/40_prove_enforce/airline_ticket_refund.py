@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import actguard as guard
+from actguard.exceptions import PolicyViolationError
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -232,7 +233,7 @@ def run_safe(client: guard.Client) -> None:
             with guard.session("sess_refund_safe", {"user_id": "john"}):
                 result = agent.invoke({"messages": [{"role": "user", "content": query}]})
                 print(f"SAFE RESULT: {_extract_agent_text(result)}")
-    except guard.GuardError as e:
+    except PolicyViolationError as e:
         print("SAFE RESULT: 🛡️ BLOCKED")
         print(f"Reason: {e}")
         print(f"LLM Hint: {e.to_prompt()}")

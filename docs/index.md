@@ -1,8 +1,8 @@
 # Overview
 
-**actguard** is a lightweight Python SDK that enforces token and cost budgets across LLM API calls without changing your existing client code.
+**actguard** is a Python SDK for runtime-scoped budget control and tool-guard enforcement in LLM agents.
 
-It works by patching the official OpenAI, Anthropic, and Google Generative AI SDKs at the transport layer. Wrap any block of code in a `BudgetGuard` context manager and actguard transparently counts tokens and USD spend in real time, raising `BudgetExceededError` the moment a limit is hit.
+It patches supported provider SDKs at the transport layer while a budget scope is active, tracks spend in real time, and raises guard exceptions when a run exceeds its configured budget or violates tool policy.
 
 ## Installation
 
@@ -13,54 +13,56 @@ pip install actguard
 ## Quickstart
 
 ```python
-from actguard import BudgetGuard
 import openai
+from actguard import Client
+from actguard.exceptions import BudgetExceededError
 
-client = openai.OpenAI()
+ag = Client.from_env()
+oai = openai.OpenAI()
 
-with BudgetGuard(user_id="alice", token_limit=1_000) as guard:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": "Hello!"}],
-    )
+try:
+    with ag.run(user_id="alice"):
+        with ag.budget_guard(usd_limit=0.05) as guard:
+            response = oai.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "Hello!"}],
+            )
+            print(response.choices[0].message.content)
+except BudgetExceededError:
+    print("Budget hit.")
 
-print(f"Used ${guard.usd_used:.4f} of ${guard.usd_limit:.2f}")
+print(f"Used ${guard.usd_used:.4f}")
 ```
 
-No configuration file, no proxy, no side-car process. Budget state lives in a Python [`ContextVar`](https://docs.python.org/3/library/contextvars.html), so it is isolated per async task and per thread.
+For reserve/settle-backed budget scopes, configure the client with `ACTGUARD_CONFIG` or `Client.from_file(...)`.
 
 ## Key features
 
-- **Token and USD limits**: set one, the other, or both.
-- **Zero code changes to LLM calls**: patch is applied once when entering the `with` block.
-- **Streaming support**: usage is captured from final stream chunks; stream contents are untouched.
-- **Async support**: `BudgetGuard` is both a sync and async context manager.
-- **Multi-provider**: OpenAI, Anthropic, Google Generative AI out of the box.
-- **Context-var isolation**: nested or concurrent guards do not interfere.
-- **Tool guards**: `rate_limit`, `circuit_breaker`, `max_attempts`, `timeout`, `idempotent`, plus `prove`/`enforce` chain-of-custody decorators.
-- **Gateway-ready**: optionally report tool checks to the ActGuard platform.
+- **USD budget scopes** with reserve/settle accounting
+- **Run-scoped tool state** via `client.run(...)` for `max_attempts` and `idempotent`
+- **Chain-of-custody sessions** via `actguard.session(...)` for `prove` and `enforce`
+- **Streaming support** across supported provider SDKs
+- **Async support** for run scopes, budget scopes, and sessions
+- **Multi-provider integrations** for OpenAI, Anthropic, and Google SDKs
+- **Concrete exception taxonomy** under `actguard.exceptions`
 
 ## How it works
 
-```
+```text
 your code
-  └── BudgetGuard.__enter__()
-        ├── patches SyncAPIClient.request  (OpenAI)
-        ├── patches Messages.create        (Anthropic)
-        └── patches GenerativeModel.generate_content  (Google)
-
-each patched call:
-  1. pre-check: raise BudgetExceededError if already over limit
-  2. forward to original SDK method
-  3. read usage from response / stream
-  4. accumulate tokens_used + usd_used on the BudgetState ContextVar
-  5. post-check: raise BudgetExceededError if now over limit
+  └── client.run(...)
+        └── client.budget_guard(...)
+              ├── patch supported provider transports
+              ├── reserve budget on enter
+              ├── collect usage from responses / streams
+              ├── accumulate usd_used and tokens_used
+              └── settle budget on exit
 ```
 
 ## Next steps
 
-- [Getting Started](./getting-started.md) - installation options and first examples
-- [Core Concepts](./concepts.md) - limits, context isolation, streaming, and tool runtime context
-- [Tool Guards](./tool-guards.md) - rate limiting, circuit breaker, max attempts, timeout, idempotency, chain-of-custody, and framework integrations
-- [Integrations](./integrations/openai.md) - provider-specific notes and requirements
-- [API Reference](./api-reference.md) - full API and exception reference
+- [Getting started](./getting-started.md)
+- [Core concepts](./concepts.md)
+- [Tool guards](./tool-guards.md)
+- [Integrations](./integrations/openai.md)
+- [API reference](./api-reference.md)

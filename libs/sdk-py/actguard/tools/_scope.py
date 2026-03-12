@@ -4,6 +4,8 @@ import json
 from contextvars import ContextVar, Token
 from typing import Any, Dict, Optional, Tuple
 
+from actguard.exceptions import ScopeValidationError
+
 
 def extract_arg(fn, arg_name: str, args: tuple, kwargs: dict) -> Any:
     sig = inspect.signature(fn)
@@ -13,10 +15,10 @@ def extract_arg(fn, arg_name: str, args: tuple, kwargs: dict) -> Any:
 
 
 def validate_scope(fn, arg_name: str) -> None:
-    """Raise ValueError at decoration time if arg_name is not a parameter of fn."""
+    """Raise ScopeValidationError at decoration time if arg_name is invalid."""
     sig = inspect.signature(fn)
     if arg_name not in sig.parameters:
-        raise ValueError(
+        raise ScopeValidationError(
             f"actguard: scope={arg_name!r} is not a parameter of {fn.__qualname__!r}. "
             f"Valid parameters: {list(sig.parameters)}"
         )

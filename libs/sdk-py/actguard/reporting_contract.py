@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from actguard.exceptions import ReportingContractError
+
 
 MetricSource = Literal["deterministic", "attributed", "mixed"]
 
@@ -49,7 +51,7 @@ def metric_source(metric_name: str) -> MetricSource:
         return "attributed"
     if metric_name in MIXED_RESPONSE_FIELDS:
         return "mixed"
-    raise KeyError(f"Unknown reporting metric: {metric_name}")
+    raise ReportingContractError(f"Unknown reporting metric: {metric_name}")
 
 
 def is_attributed_spend_event(*, category: str, name: str, usd_micros: int | None) -> bool:

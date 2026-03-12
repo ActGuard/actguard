@@ -140,7 +140,7 @@ def emit_usage_event(
 
 
 def emit_violation(error: Exception, **context_overrides) -> None:
-    """Emit a structured violation event for an ActGuardViolation error."""
+    """Emit a structured event for an ActGuard error with reporting metadata."""
     client, config = _runtime_event_client_and_config()
     if client is None:
         return
@@ -149,10 +149,10 @@ def emit_violation(error: Exception, **context_overrides) -> None:
         return
 
     from actguard.events.envelope import ActGuardContextEvidenceProvider
-    from actguard.exceptions import ActGuardViolation
+    from actguard.exceptions import ActGuardError
     from actguard.plugins import get_plugins
 
-    if not isinstance(error, ActGuardViolation):
+    if not isinstance(error, ActGuardError) or not error.is_reportable:
         return
 
     # Collect evidence
@@ -170,13 +170,6 @@ def emit_violation(error: Exception, **context_overrides) -> None:
         except Exception:
             pass
 
-    # Derive category/name from error.code
-    code = error.code or ""
-    if "." in code:
-        category, name = code.split(".", 1)
-    else:
-        category, name = "unknown", code
-
     err_payload = {}
     try:
         err_payload = error.payload()
@@ -184,8 +177,8 @@ def emit_violation(error: Exception, **context_overrides) -> None:
         pass
 
     emit_event(
-        category,
-        name,
+        error.event_category,
+        error.event_name,
         err_payload,
         severity=error.severity,
         outcome=error.outcome,

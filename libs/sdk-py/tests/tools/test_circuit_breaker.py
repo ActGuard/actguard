@@ -3,7 +3,7 @@ import importlib
 import pytest
 
 import actguard
-from actguard.exceptions import CircuitOpenError
+from actguard.exceptions import CircuitBreakerConfigurationError, CircuitOpenError
 from actguard.tools.circuit_breaker import (
     FAIL_ON_DEFAULT,
     FailureKind,
@@ -185,25 +185,25 @@ def test_unknown_exception_does_not_open_by_default():
 
 
 def test_validation_rules():
-    with pytest.raises(ValueError, match="name"):
+    with pytest.raises(CircuitBreakerConfigurationError, match="name"):
 
         @circuit_breaker(name="")
         def bad_name():
             return None
 
-    with pytest.raises(ValueError, match="max_fails"):
+    with pytest.raises(CircuitBreakerConfigurationError, match="max_fails"):
 
         @circuit_breaker(name="dep", max_fails=0)
         def bad_max_fails():
             return None
 
-    with pytest.raises(ValueError, match="reset_timeout"):
+    with pytest.raises(CircuitBreakerConfigurationError, match="reset_timeout"):
 
         @circuit_breaker(name="dep", reset_timeout=0)
         def bad_reset_timeout():
             return None
 
-    with pytest.raises(ValueError, match="disjoint"):
+    with pytest.raises(CircuitBreakerConfigurationError, match="disjoint"):
 
         @circuit_breaker(
             name="dep",
@@ -213,7 +213,7 @@ def test_validation_rules():
         def bad_overlap():
             return None
 
-    with pytest.raises(ValueError, match="FailureKind"):
+    with pytest.raises(CircuitBreakerConfigurationError, match="FailureKind"):
 
         @circuit_breaker(name="dep", fail_on={"timeout"})
         def bad_fail_on_type():

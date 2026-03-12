@@ -39,11 +39,11 @@ class _ClientRunContext:
         self._token: Optional[Token] = None
 
     def __enter__(self) -> "_ClientRunContext":
-        from actguard.exceptions import NestedRunContextError
+        from actguard.exceptions import NestedRuntimeContextError
 
         active = get_run_state()
         if active is not None:
-            raise NestedRunContextError(
+            raise NestedRuntimeContextError(
                 "Nested runtime contexts are not supported. "
                 f"Active run_id={active.run_id!r}; finish the current client.run(...) "
                 "before entering another."
@@ -86,9 +86,9 @@ class _ClientRunContext:
                     outcome="success",
                 )
             else:
-                from actguard.exceptions import ActGuardViolation
+                from actguard.exceptions import ActGuardError
 
-                if issubclass(exc_type, ActGuardViolation):
+                if issubclass(exc_type, ActGuardError) and getattr(exc_type, "outcome", "") == "blocked":
                     emit_event(
                         "run",
                         "end",
@@ -209,7 +209,7 @@ class Client:
     def _post_budget_api(
         self, *, path: str, payload: Mapping[str, Any]
     ) -> Mapping[str, Any]:
-        from actguard.exceptions import BudgetPaymentRequiredError, BudgetTransportError
+        from actguard.exceptions import ActGuardPaymentRequired, BudgetTransportError
 
         if not self.gateway_url:
             raise BudgetTransportError(
@@ -247,10 +247,12 @@ class Client:
             except urllib.error.HTTPError as exc:
                 status = exc.code
                 if status == 402:
-                    raise BudgetPaymentRequiredError(path=path, status=status) from exc
+                    raise ActGuardPaymentRequired(path=path, status=status, cause=exc) from exc
                 if status in (400, 401, 403, 422):
                     raise BudgetTransportError(
-                        f"Budget API request failed with status {status} at {path}."
+                        f"Budget API request failed with status {status} at {path}.",
+                        cause=exc,
+                        status_code=status,
                     ) from exc
                 last_error = exc
             except Exception as exc:
@@ -267,7 +269,8 @@ class Client:
         from actguard.exceptions import BudgetTransportError
 
         raise BudgetTransportError(
-            f"Budget API request failed at {path}: {type(last_error).__name__}"
+            f"Budget API request failed at {path}: {type(last_error).__name__}",
+            cause=last_error,
         ) from last_error
 
     def reserve_budget(

@@ -6,7 +6,7 @@ import time
 from enum import Enum
 from typing import Any, Optional
 
-from ..exceptions import CircuitOpenError
+from ..exceptions import CircuitBreakerConfigurationError, CircuitOpenError
 from ._observability import emit_guard_blocked
 
 
@@ -34,7 +34,9 @@ FAIL_ON_STRICT = FAIL_ON_DEFAULT | frozenset({FailureKind.AUTH, FailureKind.THRO
 FAIL_ON_INFRA_ONLY = frozenset({FailureKind.TRANSPORT, FailureKind.TIMEOUT})
 
 if FAIL_ON_DEFAULT & IGNORE_ON_DEFAULT:
-    raise RuntimeError("FAIL_ON_DEFAULT and IGNORE_ON_DEFAULT must be disjoint")
+    raise CircuitBreakerConfigurationError(
+        "FAIL_ON_DEFAULT and IGNORE_ON_DEFAULT must be disjoint"
+    )
 
 _TRANSPORT_ERRNOS = {
     errno.ECONNRESET,
@@ -84,7 +86,7 @@ def circuit_breaker(
 
     overlap = fail_on_set & ignore_on_set
     if overlap:
-        raise ValueError(
+        raise CircuitBreakerConfigurationError(
             "fail_on and ignore_on must be disjoint; overlapping values: "
             f"{sorted(k.name for k in overlap)}"
         )
@@ -173,24 +175,28 @@ def circuit_breaker(
 
 def _validate_name(name: str) -> None:
     if not isinstance(name, str) or not name.strip():
-        raise ValueError("name must be a non-empty string")
+        raise CircuitBreakerConfigurationError("name must be a non-empty string")
 
 
 def _validate_thresholds(max_fails: int, reset_timeout: float) -> None:
     if not isinstance(max_fails, int) or isinstance(max_fails, bool) or max_fails < 1:
-        raise ValueError("max_fails must be an integer >= 1")
+        raise CircuitBreakerConfigurationError("max_fails must be an integer >= 1")
     if not isinstance(reset_timeout, (int, float)) or reset_timeout <= 0:
-        raise ValueError("reset_timeout must be > 0")
+        raise CircuitBreakerConfigurationError("reset_timeout must be > 0")
 
 
 def _validate_kind_set(field_name: str, kinds) -> frozenset[FailureKind]:
     if not isinstance(kinds, (set, frozenset)):
-        raise ValueError(f"{field_name} must be a set of FailureKind")
+        raise CircuitBreakerConfigurationError(
+            f"{field_name} must be a set of FailureKind"
+        )
 
     normalized: set[FailureKind] = set()
     for item in kinds:
         if not isinstance(item, FailureKind):
-            raise ValueError(f"{field_name} must contain only FailureKind values")
+            raise CircuitBreakerConfigurationError(
+                f"{field_name} must contain only FailureKind values"
+            )
         normalized.add(item)
 
     return frozenset(normalized)

@@ -2,12 +2,15 @@ import functools
 import inspect
 
 from ..core.run_context import require_run_state
+from ..exceptions import MaxAttemptsConfigurationError
 from ._observability import emit_guard_blocked
 
 
 def max_attempts(fn=None, *, calls: int):
     if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
-        raise ValueError(f"max_attempts: calls must be an integer >= 1, got {calls!r}")
+        raise MaxAttemptsConfigurationError(
+            f"max_attempts: calls must be an integer >= 1, got {calls!r}"
+        )
 
     if fn is None:
         return lambda f: max_attempts(f, calls=calls)
