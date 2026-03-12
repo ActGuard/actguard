@@ -26,14 +26,21 @@ uv add actguard
 Stop spending as soon as a user's request crosses $0.05:
 
 ```python
-from actguard import Client, BudgetExceededError
+from actguard import (
+    BudgetExceededError,
+    BudgetPaymentRequiredError,
+    BudgetTransportError,
+    Client,
+)
 import openai
 
 ag = Client.from_file("./actguard.json")
 oai = openai.OpenAI()
+guard = None
 
 try:
-    with ag.budget_guard(user_id="alice", usd_limit=0.05) as guard:
+    with ag.budget_guard(user_id="alice", usd_limit=0.05) as g:
+        guard = g
         response = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Summarise the history of Rome."}],
@@ -41,8 +48,13 @@ try:
         print(response.choices[0].message.content)
 except BudgetExceededError as e:
     print(f"Budget hit: {e}")
+except BudgetPaymentRequiredError as e:
+    print(f"Billing rejected reserve/settle: {e}")
+except BudgetTransportError as e:
+    print(f"Budget transport failed: {e}")
 finally:
-    print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
+    if guard is not None:
+        print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
 ```
 
 Under the hood, `client.budget_guard(...)` reserves on enter (`POST /api/v1/reserve`)

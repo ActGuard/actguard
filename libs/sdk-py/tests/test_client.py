@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 
 import pytest
 
@@ -8,7 +10,12 @@ import actguard
 from actguard.core.budget_context import get_budget_state
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
-from actguard.exceptions import MissingRuntimeContextError, NestedRunContextError
+from actguard.exceptions import (
+    BudgetPaymentRequiredError,
+    BudgetTransportError,
+    MissingRuntimeContextError,
+    NestedRunContextError,
+)
 
 
 def test_client_from_file_creates_usable_client(tmp_path):
@@ -260,6 +267,140 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
     assert reserve_id == "res-123"
     assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
     assert captured["timeout"] == client.timeout_s
+
+
+def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=8,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            402,
+            "Payment Required",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"payment_required"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+
+    with pytest.raises(BudgetPaymentRequiredError) as excinfo:
+        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+
+    assert attempts["count"] == 1
+    assert sleeps == []
+    assert excinfo.value.path == "/api/v1/reserve"
+    assert excinfo.value.status == 402
+    assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
+    assert excinfo.value.__cause__.code == 402
+
+
+def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=8,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            402,
+            "Payment Required",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"payment_required"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+
+    with pytest.raises(BudgetPaymentRequiredError) as excinfo:
+        client.settle_budget(
+            reserve_id="res-123",
+            provider="openai",
+            provider_model_id="gpt-4o-mini",
+            input_tokens=11,
+            cached_input_tokens=0,
+            output_tokens=7,
+        )
+
+    assert attempts["count"] == 1
+    assert sleeps == []
+    assert excinfo.value.path == "/api/v1/settle"
+    assert excinfo.value.status == 402
+    assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
+    assert excinfo.value.__cause__.code == 402
+
+
+def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=8,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+
+    with pytest.raises(BudgetTransportError) as excinfo:
+        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+
+    assert attempts["count"] == 1
+    assert sleeps == []
+    assert "status 401" in str(excinfo.value)
+
+
+def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        max_retries=2,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr("random.uniform", lambda lower, upper: 0.0)
+
+    with pytest.raises(BudgetTransportError) as excinfo:
+        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+
+    assert attempts["count"] == 3
+    assert sleeps == [0.2, 0.4]
+    assert "HTTPError" in str(excinfo.value)
 
 
 def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):

@@ -117,6 +117,18 @@ class BudgetTransportError(ActGuardError):
     """Raised when reserve/settle transport calls fail."""
 
 
+class BudgetPaymentRequiredError(BudgetTransportError):
+    """Raised when reserve/settle is rejected with HTTP 402."""
+
+    def __init__(self, *, path: str, status: int = 402) -> None:
+        self.path = path
+        self.status = status
+        super().__init__(
+            f"Budget API request failed with status {status} at {path}: "
+            "payment required."
+        )
+
+
 class MaxAttemptsExceeded(ToolGuardError, ActGuardViolation):
     """Raised when a tool exceeds its max_attempts cap within an active run."""
 

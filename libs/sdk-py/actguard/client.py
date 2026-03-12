@@ -206,8 +206,10 @@ class Client:
             plan_key=plan_key,
         )
 
-    def _post_budget_api(self, *, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        from actguard.exceptions import BudgetTransportError
+    def _post_budget_api(
+        self, *, path: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        from actguard.exceptions import BudgetPaymentRequiredError, BudgetTransportError
 
         if not self.gateway_url:
             raise BudgetTransportError(
@@ -228,7 +230,12 @@ class Client:
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
-                req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    headers=headers,
+                    method="POST",
+                )
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as response:
                     raw = response.read()
                 if not raw:
@@ -239,6 +246,8 @@ class Client:
                 return {}
             except urllib.error.HTTPError as exc:
                 status = exc.code
+                if status == 402:
+                    raise BudgetPaymentRequiredError(path=path, status=status) from exc
                 if status in (400, 401, 403, 422):
                     raise BudgetTransportError(
                         f"Budget API request failed with status {status} at {path}."
@@ -249,7 +258,10 @@ class Client:
 
             if attempt < self.max_retries:
                 jitter = random.uniform(0, self.backoff_base_ms)
-                delay_ms = min(self.backoff_base_ms * (2**attempt) + jitter, self.backoff_max_ms)
+                delay_ms = min(
+                    self.backoff_base_ms * (2**attempt) + jitter,
+                    self.backoff_max_ms,
+                )
                 time.sleep(delay_ms / 1000.0)
 
         from actguard.exceptions import BudgetTransportError
@@ -280,7 +292,9 @@ class Client:
         response = self._post_budget_api(path="/api/v1/reserve", payload=payload)
         reserve_id = response.get("reserve_id")
         if not isinstance(reserve_id, str) or not reserve_id:
-            raise BudgetTransportError("Reserve response missing required 'reserve_id'.")
+            raise BudgetTransportError(
+                "Reserve response missing required 'reserve_id'."
+            )
         return reserve_id
 
     def settle_budget(
