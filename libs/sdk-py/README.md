@@ -34,7 +34,10 @@ from actguard.exceptions import (
 )
 import openai
 
-ag = Client.from_file("./actguard.json")
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
 oai = openai.OpenAI()
 guard = None
 
@@ -268,23 +271,36 @@ with client.run():
 
 Use `actguard.Client` as the runtime entry point. If you provide gateway/API settings, events can be shipped to ActGuard.
 
-Two common ways to build a client:
+The direct constructor is the clearest option for the hosted ActGuard gateway:
+
+```python
+from actguard import Client
+
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
+```
+
+For reserve/settle-backed budget scopes, provide both `api_key` and `gateway_url`.
+If you self-host or run a custom gateway, pass that base URL instead.
+
+Two config-driven ways to build the same client:
 
 - **JSON file path**: create a file containing `gateway_url` and `api_key`.
 - **`ACTGUARD_CONFIG` env var**: set a base64 JSON blob or a JSON file path and call `Client.from_env()`.
 
 ```python
-import os
-import actguard
+from actguard import Client
 
 # From a JSON file
-client = actguard.Client.from_file("./actguard.json")
+ag = Client.from_file("./actguard.json")
 
 # From ACTGUARD_CONFIG (base64 JSON or file path)
-client = actguard.Client.from_env()
+ag = Client.from_env()
 
 # Use as canonical runtime context
-with client.run(user_id="alice"):
+with ag.run(user_id="alice"):
     ...
 ```
 

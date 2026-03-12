@@ -19,12 +19,28 @@ Use `Client` as the runtime entrypoint.
 ```python
 from actguard import Client
 
-client = Client.from_env()
-# or
-client = Client.from_file("./actguard.json")
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
 ```
 
-`ACTGUARD_CONFIG` can be either a base64-encoded JSON blob or a path to a JSON config file.
+For reserve/settle-backed budget scopes, provide both `api_key` and `gateway_url`.
+The hosted ActGuard gateway uses `https://api.actguard.ai`. If you self-host or
+run a custom gateway, pass that base URL instead.
+
+You can also load the same settings from config:
+
+```python
+from actguard import Client
+
+ag = Client.from_env()
+# or
+ag = Client.from_file("./actguard.json")
+```
+
+`ACTGUARD_CONFIG` can be either a base64-encoded JSON blob or a path to a JSON
+config file.
 
 ## Set a USD limit
 
@@ -39,7 +55,10 @@ from actguard.exceptions import (
     BudgetTransportError,
 )
 
-ag = Client.from_env()
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
 oai = openai.OpenAI()
 
 guard = None

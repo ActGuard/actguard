@@ -21,6 +21,21 @@ class actguard.Client(
 
 Runtime entrypoint for run scopes, budget scopes, and event delivery.
 
+Example:
+
+```python
+from actguard import Client
+
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
+```
+
+`gateway_url` is the base URL for the ActGuard gateway API. The SDK does not
+hardcode a specific host; `https://api.actguard.ai` is the hosted ActGuard
+gateway, and self-hosted/custom gateways can use any compatible base URL.
+
 ### Constructors
 
 ```python

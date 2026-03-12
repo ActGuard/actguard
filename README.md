@@ -34,7 +34,10 @@ from actguard.exceptions import (
     BudgetTransportError,
 )
 
-ag = Client.from_env()
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
 oai = openai.OpenAI()
 
 try:
@@ -53,6 +56,19 @@ except BudgetTransportError:
 ```
 
 This protects you from silent cost drift when an agent keeps exploring, retrying, or over-calling models. Budget scopes reserve on entry and settle on exit, so they require a configured `Client` with gateway credentials.
+
+The hosted ActGuard gateway uses `https://api.actguard.ai`:
+
+```python
+from actguard import Client
+
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
+```
+
+If you run your own gateway, pass that base URL instead.
 
 ### 2) Prove/enforce: validate the journey, not just the input
 

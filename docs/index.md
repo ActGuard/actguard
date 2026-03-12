@@ -17,7 +17,10 @@ import openai
 from actguard import Client
 from actguard.exceptions import BudgetExceededError
 
-ag = Client.from_env()
+ag = Client(
+    api_key="ag_live_agent_key",
+    gateway_url="https://api.actguard.ai",
+)
 oai = openai.OpenAI()
 
 try:
@@ -34,7 +37,10 @@ except BudgetExceededError:
 print(f"Used ${guard.usd_used:.4f}")
 ```
 
-For reserve/settle-backed budget scopes, configure the client with `ACTGUARD_CONFIG` or `Client.from_file(...)`.
+For reserve/settle-backed budget scopes, provide both `api_key` and `gateway_url`.
+The hosted ActGuard gateway uses `https://api.actguard.ai`. If you run your own
+gateway, pass that base URL instead. `Client.from_env()` and `Client.from_file(...)`
+remain available for config-driven setup.
 
 ## Key features
 
