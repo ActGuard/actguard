@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import errno
 import socket
+import ssl
 import urllib.error
 import warnings
 
 from actguard.exceptions import MonitoringDegradedError
+
+SSL_CERT_FIX_MESSAGE = (
+    "SSL certificate verification failed while connecting to the ActGuard API.\n"
+    "This usually means Python cannot find trusted CA certificates.\n\n"
+    "To fix this:\n"
+    "  • macOS (python.org installer): run 'Install Certificates.command' from\n"
+    "    /Applications/Python 3.x/ or run:\n"
+    "      pip install --upgrade certifi\n"
+    "      /Applications/Python\\ 3.*/Install\\ Certificates.command\n"
+    "  • Other systems: pip install --upgrade certifi && export SSL_CERT_FILE=$(python3 -m certifi)\n"
+    "  • Or set the SSL_CERT_FILE environment variable to a valid CA bundle path."
+)
 
 
 class ActGuardMonitoringWarning(RuntimeWarning):
@@ -78,9 +91,28 @@ def _status_code(exc: BaseException) -> int | None:
     return None
 
 
+def _is_ssl_cert_error(exc: BaseException) -> bool:
+    """Return True if *exc* (or any chained cause) is an SSL certificate verification error."""
+    for current in _error_chain(exc):
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if isinstance(current, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(current):
+            return True
+        if isinstance(current, urllib.error.URLError):
+            reason = current.reason
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                return True
+            if isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason):
+                return True
+    return False
+
+
 def _failure_kind(exc: BaseException, *, status_code: int | None) -> str:
     if status_code is not None:
         return "http"
+
+    if _is_ssl_cert_error(exc):
+        return "ssl_cert"
 
     for current in _error_chain(exc):
         if isinstance(current, (TimeoutError, socket.timeout)):

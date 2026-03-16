@@ -118,6 +118,17 @@ class EventClient:
                     break
                 # 429, 5xx → retry
             except Exception as exc:
+                from actguard._monitoring import SSL_CERT_FIX_MESSAGE, _is_ssl_cert_error
+
+                if _is_ssl_cert_error(exc):
+                    warn_monitoring_issue(
+                        subsystem="events",
+                        operation="ship",
+                        exc=exc,
+                        path="/api/v1/events",
+                        stacklevel=2,
+                    )
+                    return
                 last_error = exc
                 # network error → retry
 
