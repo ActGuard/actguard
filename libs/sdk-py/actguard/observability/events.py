@@ -123,10 +123,10 @@ def emit_usage_event(
     *,
     provider: str,
     model: str,
-    usd_micros: int,
     input_tokens: int,
     cached_input_tokens: int,
     output_tokens: int,
+    usd_micros: int = 0,
     payload: Optional[dict] = None,
 ) -> None:
     emit_event(
@@ -135,7 +135,7 @@ def emit_usage_event(
         payload or {},
         provider=provider,
         model=model,
-        usd_micros=usd_micros,
+        usd_micros=usd_micros or None,
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,

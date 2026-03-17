@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from typing import Optional
 
-
 _tool_name: ContextVar[Optional[str]] = ContextVar("_tool_name", default=None)
 
 

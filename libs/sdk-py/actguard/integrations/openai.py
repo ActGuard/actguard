@@ -4,12 +4,11 @@ from typing import Iterator
 
 from actguard.budget_events import emit_budget_blocked
 from actguard.core.budget_context import (
-    add_cost,
     check_budget_limits,
     get_budget_state,
     record_usage,
 )
-from actguard.core.pricing import get_cost
+from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
 
@@ -30,8 +29,16 @@ def _record_usage(
     output_tokens: int,
     cached_input_tokens: int = 0,
 ) -> None:
-    usd = get_cost("openai", model, input_tokens, output_tokens)
-    if get_budget_state() is None:
+    recorder = get_current_budget_recorder()
+    if recorder is not None:
+        recorder.record_usage(
+            provider="openai",
+            provider_model_id=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+        )
+    elif get_budget_state() is None:
         state.record_usage(
             provider="openai",
             provider_model_id=model,
@@ -39,28 +46,17 @@ def _record_usage(
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
         )
-        state.add_cost(usd)
-        emit_usage_event(
+    else:
+        record_usage(
             provider="openai",
-            model=model,
-            usd_micros=int(round(usd * 1_000_000)),
+            provider_model_id=model,
             input_tokens=input_tokens,
-            cached_input_tokens=cached_input_tokens,
             output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
         )
-        return
-    record_usage(
-        provider="openai",
-        provider_model_id=model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cached_input_tokens=cached_input_tokens,
-    )
-    add_cost(usd)
     emit_usage_event(
         provider="openai",
         model=model,
-        usd_micros=int(round(usd * 1_000_000)),
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
@@ -68,6 +64,10 @@ def _record_usage(
 
 
 def _check_limits(state) -> None:
+    recorder = get_current_budget_recorder()
+    if recorder is not None:
+        recorder.check_limits()
+        return
     if get_budget_state() is None:
         if state.usd_limit is not None and state.usd_used >= state.usd_limit:
             emit_budget_blocked(state)
@@ -243,7 +243,7 @@ def patch_openai() -> None:
 
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        if state is None:
+        if state is None and get_current_budget_recorder() is None:
             return _orig_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
             )
@@ -269,7 +269,7 @@ def patch_openai() -> None:
 
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        if state is None:
+        if state is None and get_current_budget_recorder() is None:
             return await _orig_async_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
             )

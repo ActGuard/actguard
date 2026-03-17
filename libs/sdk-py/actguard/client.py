@@ -137,6 +137,26 @@ class Client:
             plan_key=plan_key,
         )
 
+    def request_budget_session(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        name: Optional[str] = None,
+        usd_limit: Optional[float] = None,
+        run_id: Optional[str] = None,
+        plan_key: Optional[str] = None,
+    ):
+        from actguard.lazy_budget_session import LazyRequestBudgetSession
+
+        return LazyRequestBudgetSession(
+            client=self,
+            user_id=user_id,
+            name=name,
+            usd_limit=usd_limit,
+            run_id=run_id,
+            plan_key=plan_key,
+        )
+
     def prepare_budget_scope(self) -> None:
         self._integration_bootstrap.ensure_patched()
 

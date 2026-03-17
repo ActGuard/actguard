@@ -6,13 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from actguard._monitoring import (
-    SSL_CERT_FIX_MESSAGE,
     ActGuardMonitoringWarning,
     _failure_kind,
     _is_ssl_cert_error,
 )
 from actguard.exceptions import BudgetTransportError
-
 
 # ---------------------------------------------------------------------------
 # _is_ssl_cert_error helper

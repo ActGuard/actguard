@@ -7,8 +7,8 @@ import pytest
 import actguard
 from actguard.exceptions import (
     ActGuardToolError,
-    MaxAttemptsExceeded,
     MaxAttemptsConfigurationError,
+    MaxAttemptsExceeded,
     MissingRuntimeContextError,
     NestedRuntimeContextError,
 )

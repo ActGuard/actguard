@@ -1,6 +1,8 @@
+"""Lazy request-scoped budget session that defers reservation until first usage."""
 from __future__ import annotations
 
 from contextvars import Token
+from threading import Lock
 from typing import TYPE_CHECKING, Optional
 
 from actguard._monitoring import warn_monitoring_issue
@@ -31,55 +33,17 @@ if TYPE_CHECKING:
     from actguard.core.run_context import RunState
 
 
-class _EagerBudgetRecorder:
-    """BudgetRecorder that delegates to global budget_context helpers immediately."""
-
-    def record_usage(
-        self,
-        *,
-        provider: str,
-        provider_model_id: str,
-        input_tokens: int,
-        output_tokens: int,
-        cached_input_tokens: int = 0,
-    ) -> None:
-        record_usage(
-            provider=provider,
-            provider_model_id=provider_model_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_input_tokens,
-        )
-
-    def check_limits(self) -> None:
-        from actguard.budget_events import emit_budget_blocked
-
-        violation = check_budget_limits()
-        if violation is not None:
-            blocked_scope = violation.blocked_scope
-            emit_budget_blocked(blocked_scope)
-            raise BudgetExceededError(
-                user_id=blocked_scope.user_id,
-                tokens_used=blocked_scope.tokens_used,
-                usd_used=blocked_scope.usd_used,
-                usd_limit=blocked_scope.usd_limit,
-                limit_type="usd",
-                scope_id=blocked_scope.scope_id,
-                scope_name=blocked_scope.scope_name,
-                scope_kind=blocked_scope.scope_kind,
-                parent_scope_id=blocked_scope.parent_scope_id,
-                root_scope_id=blocked_scope.root_scope_id,
-            )
-
-
 def _to_micros(usd_limit: Optional[float]) -> Optional[int]:
     if usd_limit is None:
         return None
     return int(round(usd_limit * 1_000_000))
 
 
-class BudgetGuard:
-    """Client-bound budget scope layered on top of run scope."""
+class LazyRequestBudgetSession:
+    """Budget session that defers ``reserve_budget()`` until first metered usage.
+
+    Requests with no LLM calls skip reserve/settle entirely.
+    """
 
     def __init__(
         self,
@@ -108,23 +72,15 @@ class BudgetGuard:
         self._created_root = False
         self.run_id: Optional[str] = None
 
+        # Lazy reservation state
+        self._reserve_lock = Lock()
+        self._record_lock = Lock()  # covers full record_usage() flow
+        self._reserved = False
+        self._reserve_failed = False
+
     def _budget_reporting_enabled(self) -> bool:
         config = self._client.reporting_config
         return bool(config.gateway_url and config.api_key)
-
-    def _warn_budget_transport_issue(
-        self,
-        *,
-        operation: str,
-        exc: BaseException,
-    ) -> None:
-        warn_monitoring_issue(
-            subsystem="budget",
-            operation=operation,
-            exc=exc,
-            path=f"/api/v1/{operation}",
-            stacklevel=3,
-        )
 
     def _bind_run_state(self) -> Optional[str]:
         from actguard.core.run_context import require_run_state
@@ -194,39 +150,92 @@ class BudgetGuard:
         self._is_root_scope = True
         return build_root_scope_state(shared_root)
 
-    def _attach_nested_scope(self, *, user_id: Optional[str]) -> BudgetState:
-        stack = get_budget_stack()
-        parent_scope = stack[-1]
-        shared_root = parent_scope.shared_root
-        assert shared_root is not None
-        if self.plan_key is not None and shared_root.plan_key != self.plan_key:
-            raise BudgetConfigurationError(
-                "budget_guard plan_key does not match the existing root scope."
-            )
-
-        self._shared_root = shared_root
-        self._is_root_scope = False
-        return BudgetState(
-            user_id=user_id,
-            run_id=parent_scope.run_id,
-            tenant_id=parent_scope.tenant_id,
-            scope_name=self.name,
-            scope_kind="nested",
-            parent_scope_id=parent_scope.scope_id,
-            root_scope_id=shared_root.root_scope_id,
-            usd_limit=self.usd_limit,
-            usd_limit_micros=_to_micros(self.usd_limit),
-            plan_key=shared_root.plan_key,
-            reserve_id=shared_root.reserve_id,
-            shared_root=shared_root,
-        )
-
     def _rollback_root_attach(self) -> None:
         if self._shared_root is None or self._run_state is None:
             return
         self._run_state.release_budget_root(self._shared_root)
 
-    def __enter__(self) -> "BudgetGuard":
+    def _ensure_reserved(self) -> None:
+        """Thread-safe lazy reservation. Called on first metered usage."""
+        if self._reserved or self._reserve_failed:
+            return
+        with self._reserve_lock:
+            if self._reserved or self._reserve_failed:
+                return
+            if not (self._is_root_scope and self._created_root):
+                self._reserved = True
+                return
+            if not self._budget_reporting_enabled():
+                self._reserved = True
+                return
+            assert self._shared_root is not None
+            assert self._run_id is not None
+            try:
+                reserve_id = self._client.reserve_budget(
+                    run_id=self._run_id,
+                    usd_limit_micros=self._shared_root.root_budget_limit_micros,
+                    plan_key=self._shared_root.plan_key,
+                    user_id=self._shared_root.user_id,
+                )
+            except Exception as exc:
+                warn_monitoring_issue(
+                    subsystem="budget",
+                    operation="reserve",
+                    exc=exc,
+                    path="/api/v1/reserve",
+                    stacklevel=3,
+                )
+                self._reserve_failed = True
+            else:
+                self._shared_root.reserve_id = reserve_id
+                if self._state is not None:
+                    self._state.reserve_id = reserve_id
+                self._reserved = True
+
+    # -- BudgetRecorder interface --
+
+    def record_usage(
+        self,
+        *,
+        provider: str,
+        provider_model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int = 0,
+    ) -> None:
+        with self._record_lock:
+            self._ensure_reserved()
+            record_usage(
+                provider=provider,
+                provider_model_id=provider_model_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+            )
+
+    def check_limits(self) -> None:
+        violation = check_budget_limits()
+        if violation is not None:
+            from actguard.budget_events import emit_budget_blocked
+
+            blocked_scope = violation.blocked_scope
+            emit_budget_blocked(blocked_scope)
+            raise BudgetExceededError(
+                user_id=blocked_scope.user_id,
+                tokens_used=blocked_scope.tokens_used,
+                usd_used=blocked_scope.usd_used,
+                usd_limit=blocked_scope.usd_limit,
+                limit_type="usd",
+                scope_id=blocked_scope.scope_id,
+                scope_name=blocked_scope.scope_name,
+                scope_kind=blocked_scope.scope_kind,
+                parent_scope_id=blocked_scope.parent_scope_id,
+                root_scope_id=blocked_scope.root_scope_id,
+            )
+
+    # -- Context manager --
+
+    def __enter__(self) -> "LazyRequestBudgetSession":
         if self.usd_limit is not None and self.usd_limit <= 0:
             raise ActGuardUsageError(
                 "budget_guard requires usd_limit > 0 when provided.",
@@ -242,39 +251,23 @@ class BudgetGuard:
         effective_user_id = self.user_id if self.user_id is not None else active_user_id
 
         if get_budget_stack():
-            scope = self._attach_nested_scope(user_id=effective_user_id)
-        else:
-            scope = self._attach_root_scope(user_id=effective_user_id)
+            raise ActGuardUsageError(
+                "LazyRequestBudgetSession does not support "
+                "nesting inside an existing budget scope.",
+                code="usage.budget_guard_configuration",
+                reason="budget_guard_configuration",
+                retryable=False,
+            )
 
+        scope = self._attach_root_scope(user_id=effective_user_id)
         self._state = scope
 
         try:
-            if self._is_root_scope and self._created_root:
-                assert self._shared_root is not None
-                if self._budget_reporting_enabled():
-                    try:
-                        reserve_id = self._client.reserve_budget(
-                            run_id=self._run_id,
-                            usd_limit_micros=self._shared_root.root_budget_limit_micros,
-                            plan_key=self._shared_root.plan_key,
-                            user_id=self._shared_root.user_id,
-                        )
-                    except Exception as exc:
-                        self._warn_budget_transport_issue(
-                            operation="reserve",
-                            exc=exc,
-                        )
-                    else:
-                        self._shared_root.reserve_id = reserve_id
-                        self._state.reserve_id = reserve_id
-
             self._budget_token = push_budget_scope(
                 scope,
-                inherit_active_source=not self._is_root_scope,
+                inherit_active_source=False,
             )
-            self._recorder_token = set_current_budget_recorder(
-                _EagerBudgetRecorder()
-            )
+            self._recorder_token = set_current_budget_recorder(self)
         except Exception:
             if self._is_root_scope:
                 self._rollback_root_attach()
@@ -288,19 +281,28 @@ class BudgetGuard:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self._recorder_token is not None:
-            reset_current_budget_recorder(self._recorder_token)
-            self._recorder_token = None
-
-        if self._budget_token is not None:
-            pop_budget_scope(self._budget_token)
-            self._budget_token = None
-
+        # --- settle logic FIRST (recorder + scope still active for workers) ---
         if self._is_root_scope and self._shared_root is not None:
             shared_root = self._shared_root
             assert self._run_state is not None
             should_settle = self._run_state.release_budget_root(shared_root)
-            if should_settle:
+
+            # Wait for any in-progress record_usage() from worker threads
+            with self._record_lock:
+                pass
+
+            # Safety net: if usage arrived via the SharedBudgetState fallback
+            # (e.g. worker threads that bypassed the recorder ContextVar),
+            # trigger a late reserve so settle can proceed.
+            if (
+                should_settle
+                and not self._reserved
+                and not self._reserve_failed
+                and (shared_root.input_tokens + shared_root.output_tokens) > 0
+            ):
+                self._ensure_reserved()
+
+            if should_settle and self._reserved and not self._reserve_failed:
                 try:
                     if shared_root.reserve_id and shared_root.mark_settled():
                         if self._state is not None and shared_root.tokens_used == 0:
@@ -331,17 +333,29 @@ class BudgetGuard:
                             output_tokens=shared_root.output_tokens,
                         )
                 except Exception as exc:
-                    self._warn_budget_transport_issue(
+                    warn_monitoring_issue(
+                        subsystem="budget",
                         operation="settle",
                         exc=exc,
+                        path="/api/v1/settle",
+                        stacklevel=3,
                     )
+
+        # --- THEN cleanup recorder + scope ---
+        if self._recorder_token is not None:
+            reset_current_budget_recorder(self._recorder_token)
+            self._recorder_token = None
+
+        if self._budget_token is not None:
+            pop_budget_scope(self._budget_token)
+            self._budget_token = None
 
         self._run_state = None
         self._run_id = None
 
         return None
 
-    async def __aenter__(self) -> "BudgetGuard":
+    async def __aenter__(self) -> "LazyRequestBudgetSession":
         return self.__enter__()
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -358,35 +372,3 @@ class BudgetGuard:
         if self._state is None:
             return 0.0
         return self._state.usd_used
-
-    @property
-    def root_tokens_used(self) -> int:
-        if self._shared_root is not None:
-            return self._shared_root.tokens_used
-        if self._state is None:
-            return 0
-        return self._state.root_totals()[0]
-
-    @property
-    def root_usd_used(self) -> float:
-        if self._shared_root is not None:
-            return self._shared_root.usd_used
-        if self._state is None:
-            return 0.0
-        return self._state.root_totals()[1]
-
-    @property
-    def tokens_used(self) -> int:
-        if self._state is None:
-            return 0
-        if self._state.scope_kind == "root":
-            return self.root_tokens_used
-        return self.local_tokens_used
-
-    @property
-    def usd_used(self) -> float:
-        if self._state is None:
-            return 0.0
-        if self._state.scope_kind == "root":
-            return self.root_usd_used
-        return self.local_usd_used

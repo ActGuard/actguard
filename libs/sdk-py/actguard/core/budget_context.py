@@ -6,8 +6,7 @@ import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, Literal, Optional, Tuple
-
+from typing import Dict, Literal, Optional
 
 ScopeKind = Literal["root", "nested"]
 
@@ -73,10 +72,6 @@ class SharedBudgetState:
             self.output_tokens += output_tokens
             self.tokens_used += input_tokens + output_tokens
 
-    def add_cost(self, usd: float) -> None:
-        with self._lock:
-            self.usd_used += usd
-
     def mark_settled(self) -> bool:
         with self._lock:
             if self._settled:
@@ -130,10 +125,6 @@ class BudgetState:
             self.cached_input_tokens += cached_input_tokens
             self.output_tokens += output_tokens
             self.tokens_used += input_tokens + output_tokens
-
-    def add_cost(self, usd: float) -> None:
-        with self._lock:
-            self.usd_used += usd
 
     def scope_metadata(self) -> dict:
         metadata = {
@@ -225,6 +216,10 @@ def _unregister_budget_context(context: Optional[BudgetExecutionContext]) -> Non
 
 
 def _sole_active_budget_context() -> Optional[BudgetExecutionContext]:
+    # In async contexts, ContextVars are authoritative — skip fallback registry
+    from actguard.core.run_context import _in_async_context
+    if _in_async_context():
+        return None
     with _active_budget_states_lock:
         if len(_active_budget_contexts) != 1:
             return None
@@ -260,6 +255,10 @@ def get_budget_state() -> Optional[BudgetState]:
     context = _ensure_execution_context()
     if context is not None:
         return context.active_scope()
+    # Fallback only for worker threads — async tasks have proper ContextVar isolation
+    from actguard.core.run_context import _in_async_context
+    if _in_async_context():
+        return None
     with _active_budget_states_lock:
         if len(_active_budget_states) == 1:
             return next(iter(_active_budget_states.values()))
@@ -464,25 +463,6 @@ def record_usage(
         output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
     )
-
-
-def add_cost(usd: float) -> None:
-    context = _ensure_execution_context()
-    active_scope = context.active_scope() if context is not None else None
-    if context is None or active_scope is None:
-        source = _sole_active_budget_context()
-        if source is not None and source.active_scope() is not None:
-            context = source
-        else:
-            state = require_budget_state()
-            if state.shared_root is not None:
-                state.shared_root.add_cost(usd)
-            state.add_cost(usd)
-            return
-
-    context.shared_root.add_cost(usd)
-    for scope in context.scope_stack:
-        scope.add_cost(usd)
 
 
 def check_budget_limits() -> Optional[BudgetLimitViolation]:

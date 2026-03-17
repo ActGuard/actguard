@@ -72,7 +72,10 @@ class BudgetTransport:
                     ) from exc
                 last_error = exc
             except Exception as exc:
-                from actguard._monitoring import SSL_CERT_FIX_MESSAGE, _is_ssl_cert_error
+                from actguard._monitoring import (
+                    SSL_CERT_FIX_MESSAGE,
+                    _is_ssl_cert_error,
+                )
 
                 if _is_ssl_cert_error(exc):
                     raise BudgetTransportError(
