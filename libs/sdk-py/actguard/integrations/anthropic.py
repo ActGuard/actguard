@@ -3,12 +3,11 @@ from typing import AsyncIterator, Iterator
 
 from actguard.budget_events import emit_budget_blocked
 from actguard.core.budget_context import (
-    add_cost,
     check_budget_limits,
     get_budget_state,
     record_usage,
 )
-from actguard.core.pricing import get_cost
+from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
 
@@ -16,35 +15,31 @@ _patched = False
 
 
 def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> None:
-    usd = get_cost("anthropic", model, input_tokens, output_tokens)
-    if get_budget_state() is None:
+    recorder = get_current_budget_recorder()
+    if recorder is not None:
+        recorder.record_usage(
+            provider="anthropic",
+            provider_model_id=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    elif get_budget_state() is None:
         state.record_usage(
             provider="anthropic",
             provider_model_id=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         )
-        state.add_cost(usd)
-        emit_usage_event(
+    else:
+        record_usage(
             provider="anthropic",
-            model=model,
-            usd_micros=int(round(usd * 1_000_000)),
+            provider_model_id=model,
             input_tokens=input_tokens,
-            cached_input_tokens=0,
             output_tokens=output_tokens,
         )
-        return
-    record_usage(
-        provider="anthropic",
-        provider_model_id=model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
-    add_cost(usd)
     emit_usage_event(
         provider="anthropic",
         model=model,
-        usd_micros=int(round(usd * 1_000_000)),
         input_tokens=input_tokens,
         cached_input_tokens=0,
         output_tokens=output_tokens,
@@ -52,6 +47,10 @@ def _record_usage(state, model: str, input_tokens: int, output_tokens: int) -> N
 
 
 def _check_limits(state) -> None:
+    recorder = get_current_budget_recorder()
+    if recorder is not None:
+        recorder.check_limits()
+        return
     if get_budget_state() is None:
         if state.usd_limit is not None and state.usd_used >= state.usd_limit:
             emit_budget_blocked(state)
@@ -193,7 +192,7 @@ def patch_anthropic() -> None:
 
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        if state is None:
+        if state is None and get_current_budget_recorder() is None:
             return _orig_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
             )
@@ -226,7 +225,7 @@ def patch_anthropic() -> None:
 
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        if state is None:
+        if state is None and get_current_budget_recorder() is None:
             return await _orig_async_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
             )

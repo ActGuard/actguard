@@ -397,7 +397,7 @@ def test_openai_provider_call_emits_one_llm_usage_event(
     assert envelope.tool_name
     assert envelope.input_tokens == 100
     assert envelope.output_tokens == 50
-    assert envelope.usd_micros == 750
+    assert envelope.usd_micros is None
     assert wire["provider"] == "openai"
     assert wire["scope_name"] == "search_tool"
     assert wire["tool_name"] == envelope.tool_name

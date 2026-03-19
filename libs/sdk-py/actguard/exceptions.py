@@ -98,11 +98,20 @@ class ActGuardPaymentRequired(ActGuardRuntimeError):
     code = "budget.payment_required"
     reason = "payment_required"
 
-    def __init__(self, *, path: str, status: int = 402, cause: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        path: str,
+        status: int = 402,
+        cause: BaseException | None = None,
+    ) -> None:
         self.path = path
         self.status = status
         super().__init__(
-            f"Budget API request failed with status {status} at {path}: payment required.",
+            (
+                f"Budget API request failed with status {status} at {path}: "
+                "payment required."
+            ),
             code=self.code,
             reason=self.reason,
             details={"path": path, "status": status},
@@ -116,7 +125,15 @@ class RateLimitExceeded(ToolGuardError):
     code = "guard.rate_limit_exceeded"
     reason = "rate_limit_exceeded"
 
-    def __init__(self, *, func_name: str, scope_value: str, max_calls: int, period: float, retry_after: float):
+    def __init__(
+        self,
+        *,
+        func_name: str,
+        scope_value: str,
+        max_calls: int,
+        period: float,
+        retry_after: float,
+    ):
         self.func_name = func_name
         self.tool_name = func_name
         self.scope_value = scope_value
@@ -153,7 +170,10 @@ class CircuitOpenError(ToolGuardError):
         self.reset_at = reset_at
         self.retry_after = max(0.0, reset_at - time.time())
         super().__init__(
-            f"Circuit open for '{dependency_name}'. Retry after {self.retry_after:.1f}s.",
+            (
+                f"Circuit open for '{dependency_name}'. Retry after "
+                f"{self.retry_after:.1f}s."
+            ),
             code=self.code,
             reason=self.reason,
             details={
@@ -264,7 +284,13 @@ class BudgetTransportError(ActGuardRuntimeError):
     code = "runtime.transport_error"
     reason = "budget_transport_error"
 
-    def __init__(self, message: str = "", *, cause: BaseException | None = None, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        cause: BaseException | None = None,
+        status_code: int | None = None,
+    ):
         super().__init__(
             message,
             code=self.code,
@@ -290,19 +316,30 @@ class MonitoringDegradedError(ActGuardRuntimeError):
         cause: BaseException | None = None,
         path: str | None = None,
         status_code: int | None = None,
+        summary: str | None = None,
         degraded: bool = True,
     ) -> None:
         self.subsystem = subsystem
         self.operation = operation
         self.failure_kind = failure_kind
         self.path = path
+        self.summary = summary
         self.degraded = degraded
         location = f" at {path}" if path else ""
+        base_message = (
+            f"ActGuard monitoring degraded during {subsystem}.{operation}"
+            f"{location}: {failure_kind}"
+        )
+        if summary:
+            message = (
+                f"{base_message}.\n{summary}"
+                if "\n" in summary
+                else f"{base_message} ({summary})."
+            )
+        else:
+            message = f"{base_message}."
         super().__init__(
-            (
-                f"ActGuard monitoring degraded during {subsystem}.{operation}"
-                f"{location}: {failure_kind}."
-            ),
+            message,
             code=self.code,
             reason=self.reason,
             details={
@@ -310,6 +347,7 @@ class MonitoringDegradedError(ActGuardRuntimeError):
                 "operation": operation,
                 "failure_kind": failure_kind,
                 "path": path,
+                "summary": summary,
                 "degraded": degraded,
                 "cause_type": type(cause).__name__ if cause is not None else None,
             },
@@ -331,7 +369,10 @@ class MaxAttemptsExceeded(ToolGuardError):
         self.limit = limit
         self.used = used
         super().__init__(
-            f"MAX_ATTEMPTS_EXCEEDED tool={tool_name!r} used={used}/{limit} run={run_id!r}",
+            (
+                f"MAX_ATTEMPTS_EXCEEDED tool={tool_name!r} "
+                f"used={used}/{limit} run={run_id!r}"
+            ),
             code=self.code,
             reason=self.reason,
             details={
@@ -535,7 +576,10 @@ class BudgetExceededError(ToolGuardError):
         user_label = user_id if user_id is not None else "<unknown>"
         limit_label = f"${usd_limit:.6f}" if usd_limit is not None else "<unknown>"
         super().__init__(
-            f"USD limit exceeded for user '{user_label}': ${usd_used:.6f} / {limit_label} used",
+            (
+                f"USD limit exceeded for user '{user_label}': "
+                f"${usd_used:.6f} / {limit_label} used"
+            ),
             code=self.code,
             reason=self.reason,
             details={

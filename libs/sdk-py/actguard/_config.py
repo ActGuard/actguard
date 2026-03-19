@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 class ActGuardConfig:
     gateway_url: Optional[str] = None
     api_key: Optional[str] = None
+    debug: bool = False
     event_mode: str = "verbose"  # "off" | "significant" | "verbose"
     flush_interval_ms: int = 1000
     max_batch_events: int = 100

@@ -8,20 +8,68 @@ from actguard.core.budget_context import (
     BudgetState,
     SharedBudgetState,
     build_root_scope_state,
+    check_budget_limits,
     get_budget_stack,
     pop_budget_scope,
     push_budget_scope,
+    record_usage,
+)
+from actguard.core.budget_recorder import (
+    reset_current_budget_recorder,
+    set_current_budget_recorder,
 )
 from actguard.exceptions import (
     ActGuardRuntimeContextError,
     ActGuardUsageError,
     BudgetClientMismatchError,
     BudgetConfigurationError,
+    BudgetExceededError,
 )
 
 if TYPE_CHECKING:
     from actguard.client import Client
     from actguard.core.run_context import RunState
+
+
+class _EagerBudgetRecorder:
+    """BudgetRecorder that delegates to global budget_context helpers immediately."""
+
+    def record_usage(
+        self,
+        *,
+        provider: str,
+        provider_model_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int = 0,
+    ) -> None:
+        record_usage(
+            provider=provider,
+            provider_model_id=provider_model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+        )
+
+    def check_limits(self) -> None:
+        from actguard.budget_events import emit_budget_blocked
+
+        violation = check_budget_limits()
+        if violation is not None:
+            blocked_scope = violation.blocked_scope
+            emit_budget_blocked(blocked_scope)
+            raise BudgetExceededError(
+                user_id=blocked_scope.user_id,
+                tokens_used=blocked_scope.tokens_used,
+                usd_used=blocked_scope.usd_used,
+                usd_limit=blocked_scope.usd_limit,
+                limit_type="usd",
+                scope_id=blocked_scope.scope_id,
+                scope_name=blocked_scope.scope_name,
+                scope_kind=blocked_scope.scope_kind,
+                parent_scope_id=blocked_scope.parent_scope_id,
+                root_scope_id=blocked_scope.root_scope_id,
+            )
 
 
 def _to_micros(usd_limit: Optional[float]) -> Optional[int]:
@@ -53,6 +101,7 @@ class BudgetGuard:
         self._state: Optional[BudgetState] = None
         self._shared_root: Optional[SharedBudgetState] = None
         self._budget_token: Optional[Token] = None
+        self._recorder_token: Optional[Token] = None
         self._run_state: Optional["RunState"] = None
         self._run_id: Optional[str] = None
         self._is_root_scope = False
@@ -223,6 +272,9 @@ class BudgetGuard:
                 scope,
                 inherit_active_source=not self._is_root_scope,
             )
+            self._recorder_token = set_current_budget_recorder(
+                _EagerBudgetRecorder()
+            )
         except Exception:
             if self._is_root_scope:
                 self._rollback_root_attach()
@@ -236,6 +288,10 @@ class BudgetGuard:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._recorder_token is not None:
+            reset_current_budget_recorder(self._recorder_token)
+            self._recorder_token = None
+
         if self._budget_token is not None:
             pop_budget_scope(self._budget_token)
             self._budget_token = None

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import ssl
 import urllib.error
 
 import pytest
 
 import actguard
+from actguard.client import DEFAULT_GATEWAY_URL
 from actguard.core.budget_context import get_budget_state
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
@@ -107,12 +109,21 @@ def test_run_context_clears_after_exception():
 def test_client_defaults_split_budget_and_event_transport_config():
     client = actguard.Client()
 
+    assert client.gateway_url == DEFAULT_GATEWAY_URL
+    assert client.reporting_config.gateway_url == DEFAULT_GATEWAY_URL
     assert client.budget_timeout_s == 3.0
     assert client.budget_max_retries == 1
     assert client.event_timeout_s == 5.0
     assert client.event_max_retries == 8
     assert client.timeout_s == client.event_timeout_s
     assert client.max_retries == client.event_max_retries
+
+
+def test_client_explicit_gateway_url_overrides_default():
+    client = actguard.Client(gateway_url="https://gw.example")
+
+    assert client.gateway_url == "https://gw.example"
+    assert client.reporting_config.gateway_url == "https://gw.example"
 
 
 def test_legacy_timeout_alias_populates_both_transport_configs():
@@ -183,12 +194,13 @@ def test_reserve_budget_posts_expected_request_shape(monkeypatch):
         def read(self):
             return b'{"reserve_id":"res-123"}'
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["url"] = request.full_url
         captured["auth"] = request.headers.get("Authorization")
         captured["content_type"] = request.headers.get("Content-type")
         captured["payload"] = json.loads(request.data.decode())
         captured["timeout"] = timeout
+        captured["context"] = context
         return _Response()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -211,6 +223,7 @@ def test_reserve_budget_posts_expected_request_shape(monkeypatch):
         "user_id": "alice",
     }
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
+    assert isinstance(captured["context"], ssl.SSLContext)
 
 
 def test_settle_budget_posts_expected_request_shape(monkeypatch):
@@ -231,11 +244,12 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
         def read(self):
             return b"{}"
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["url"] = request.full_url
         captured["auth"] = request.headers.get("Authorization")
         captured["payload"] = json.loads(request.data.decode())
         captured["timeout"] = timeout
+        captured["context"] = context
         return _Response()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -260,6 +274,41 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
         "output_tokens": 30,
     }
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
+    assert isinstance(captured["context"], ssl.SSLContext)
+
+
+def test_reserve_budget_http_gateway_omits_ssl_context(monkeypatch):
+    captured = {}
+    client = actguard.Client(
+        gateway_url="http://localhost:8787",
+        api_key="sk-test",
+        budget_max_retries=0,
+    )
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return b'{"reserve_id":"res-123"}'
+
+    def fake_urlopen(request, timeout, context=None):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["context"] = context
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+
+    assert reserve_id == "res-123"
+    assert captured["url"] == "http://localhost:8787/api/v1/reserve"
+    assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
+    assert captured["context"] is None
 
 
 def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
@@ -280,9 +329,10 @@ def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
         def read(self):
             return b'{"reserve_id":"res-123"}'
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["payload"] = json.loads(request.data.decode())
         captured["timeout"] = timeout
+        captured["context"] = context
         return _Response()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -292,6 +342,7 @@ def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
     assert reserve_id == "res-123"
     assert captured["payload"] == {"run_id": "run-1"}
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
+    assert isinstance(captured["context"], ssl.SSLContext)
 
 
 def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
@@ -312,9 +363,10 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
         def read(self):
             return b'{"reserve_id":"res-123"}'
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["payload"] = json.loads(request.data.decode())
         captured["timeout"] = timeout
+        captured["context"] = context
         return _Response()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -329,6 +381,7 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
     assert reserve_id == "res-123"
     assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
+    assert isinstance(captured["context"], ssl.SSLContext)
 
 
 def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
@@ -340,7 +393,7 @@ def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
     attempts = {"count": 0}
     sleeps: list[float] = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         attempts["count"] += 1
         raise urllib.error.HTTPError(
             request.full_url,
@@ -373,7 +426,7 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     attempts = {"count": 0}
     sleeps: list[float] = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         attempts["count"] += 1
         raise urllib.error.HTTPError(
             request.full_url,
@@ -413,7 +466,7 @@ def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
     attempts = {"count": 0}
     sleeps: list[float] = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         attempts["count"] += 1
         raise urllib.error.HTTPError(
             request.full_url,
@@ -434,6 +487,44 @@ def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
     assert "status 401" in str(excinfo.value)
 
 
+def test_settle_budget_409_remains_budget_transport_error_without_retry(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=8,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout, context=None):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"reservation not found"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+
+    with pytest.raises(BudgetTransportError) as excinfo:
+        client.settle_budget(
+            reserve_id="res-123",
+            provider="openai",
+            provider_model_id="gpt-4o-mini",
+            input_tokens=11,
+            cached_input_tokens=2,
+            output_tokens=7,
+        )
+
+    assert attempts["count"] == 1
+    assert sleeps == []
+    assert "status 409" in str(excinfo.value)
+    assert "reservation not found" in str(excinfo.value)
+
+
 def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
@@ -444,7 +535,7 @@ def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     attempts = {"count": 0}
     sleeps: list[float] = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         attempts["count"] += 1
         raise urllib.error.HTTPError(
             request.full_url,
@@ -476,7 +567,7 @@ def test_reserve_budget_retry_backoff_respects_total_budget_timeout(monkeypatch)
     attempts = {"count": 0}
     sleeps: list[float] = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         attempts["count"] += 1
         raise urllib.error.URLError(TimeoutError(f"attempt={attempts['count']}"))
 
@@ -521,13 +612,13 @@ def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):
     assert get_current_state() is None
 
 
-def test_budget_guard_without_gateway_config_skips_remote_reporting(monkeypatch):
+def test_budget_guard_without_api_key_skips_remote_reporting(monkeypatch):
     client = actguard.Client()
     calls: list[str] = []
 
     def should_not_call(**_kwargs):
         calls.append("remote")
-        raise AssertionError("reserve/settle should be skipped without gateway config")
+        raise AssertionError("reserve/settle should be skipped without api_key")
 
     monkeypatch.setattr(client, "reserve_budget", should_not_call)
     monkeypatch.setattr(client, "settle_budget", should_not_call)
@@ -565,6 +656,7 @@ def test_budget_guard_reserve_transport_failure_warns_and_degrades_open(monkeypa
     assert warning.error.subsystem == "budget"
     assert warning.error.operation == "reserve"
     assert warning.error.failure_kind == "timeout"
+    assert "TimeoutError: timed out" in str(warning)
 
 
 def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch):
@@ -590,7 +682,39 @@ def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch
     assert warning.error.subsystem == "budget"
     assert warning.error.operation == "settle"
     assert warning.error.failure_kind == "connection"
+    assert "ConnectionRefusedError: refused" in str(warning)
     assert get_current_state() is None
+
+
+def test_budget_guard_settle_http_failure_warning_includes_status_summary(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(client, "reserve_budget", lambda **_kwargs: "res-123")
+    monkeypatch.setattr(
+        client,
+        "settle_budget",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BudgetTransportError(
+                "Budget API request failed with status 503 at /api/v1/settle.",
+                status_code=503,
+            )
+        ),
+    )
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        with client.run(run_id="run-warn-settle-http"):
+            with client.budget_guard(usd_limit=0.05):
+                pass
+
+    warning = recorded[0].message
+    assert isinstance(warning.error, MonitoringDegradedError)
+    assert warning.error.operation == "settle"
+    assert warning.error.failure_kind == "http"
+    assert "status 503" in str(warning)
+    assert "/api/v1/settle" in str(warning)
 
 
 def test_client_budget_guard_requires_active_run():
@@ -652,14 +776,66 @@ def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
     assert [name for name, _ in calls] == ["reserve", "settle"]
     assert calls[0][1]["usd_limit_micros"] == 100_000
     assert calls[0][1]["plan_key"] == "pro"
-    assert calls[0][1]["user_id"] is None
-    assert calls[1][1]["reserve_id"] == "res_123"
-    assert calls[1][1]["provider"] == "openai"
-    assert calls[1][1]["provider_model_id"] == "gpt-4o-mini"
-    assert calls[1][1]["input_tokens"] == 11
-    assert calls[1][1]["cached_input_tokens"] == 2
-    assert calls[1][1]["output_tokens"] == 7
-    assert "run_id" not in calls[1][1]
+
+
+def test_client_budget_guard_debug_mode_still_calls_real_settle(monkeypatch):
+    captured: list[tuple[str, dict]] = []
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def getcode(self) -> int:
+            return self.status
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(request, timeout, context=None):
+        captured.append((request.full_url, json.loads(request.data.decode())))
+        if request.full_url.endswith("/api/v1/reserve"):
+            return _Response(b'{"reserve_id":"res-debug"}')
+        return _Response(b"{}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        debug=True,
+        budget_max_retries=0,
+        event_mode="off",
+    )
+
+    with client.run(run_id="run-debug-settle"):
+        with client.budget_guard(usd_limit=0.1):
+            budget_state = get_budget_state()
+            assert budget_state is not None
+            budget_state.provider = "openai"
+            budget_state.provider_model_id = "gpt-4o-mini"
+            budget_state.input_tokens = 11
+            budget_state.cached_input_tokens = 2
+            budget_state.output_tokens = 7
+
+    assert [url for url, _ in captured] == [
+        "https://gw.example/api/v1/reserve",
+        "https://gw.example/api/v1/settle",
+    ]
+    assert "user_id" not in captured[0][1]
+    assert captured[1][1]["reserve_id"] == "res-debug"
+    assert captured[1][1]["provider"] == "openai"
+    assert captured[1][1]["provider_model_id"] == "gpt-4o-mini"
+    assert captured[1][1]["input_tokens"] == 11
+    assert captured[1][1]["cached_input_tokens"] == 2
+    assert captured[1][1]["output_tokens"] == 7
+    assert "run_id" not in captured[1][1]
 
 
 def test_budget_guard_no_leakage_between_clients(monkeypatch):
@@ -720,13 +896,17 @@ def test_client_close_waits_for_event_client_shutdown():
 
 
 def test_event_client_ships_with_event_transport_config(monkeypatch):
-    client = actguard.Client(
+    from actguard._config import ActGuardConfig
+    from actguard.events.client import EventClient
+
+    client = object.__new__(EventClient)
+    client._config = ActGuardConfig(
         gateway_url="https://gw.example",
         api_key="sk-test",
         event_timeout_s=7.0,
         event_max_retries=2,
     )
-    assert client.event_client is not None
+    client._stop = __import__("threading").Event()
     captured = {"attempts": 0}
     sleeps: list[float] = []
 
@@ -737,9 +917,10 @@ def test_event_client_ships_with_event_transport_config(monkeypatch):
         def __exit__(self, *_):
             return None
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["attempts"] += 1
         captured["timeout"] = timeout
+        captured["context"] = context
         if captured["attempts"] < 3:
             raise urllib.error.URLError(TimeoutError("timed out"))
         return _Response()
@@ -748,13 +929,50 @@ def test_event_client_ships_with_event_transport_config(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
     monkeypatch.setattr("random.uniform", lambda lower, upper: 0.0)
 
-    client.event_client._ship_with_retry([{"name": "evt"}])
+    client._ship_with_retry([{"name": "evt"}])
 
     assert captured["attempts"] == 3
     assert captured["timeout"] == 7.0
-    assert sleeps == [0.2, 0.4]
+    assert isinstance(captured["context"], ssl.SSLContext)
+    assert len(sleeps) == 2
+    assert sleeps[0] == pytest.approx(0.2)
+    assert sleeps[1] >= sleeps[0]
 
-    client.close()
+
+def test_event_client_http_gateway_omits_ssl_context(monkeypatch):
+    from actguard._config import ActGuardConfig
+    from actguard.events.client import EventClient
+
+    client = object.__new__(EventClient)
+    client._config = ActGuardConfig(
+        gateway_url="http://localhost:8787",
+        api_key="sk-test",
+        event_timeout_s=7.0,
+        event_max_retries=0,
+    )
+    client._stop = __import__("threading").Event()
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+    def fake_urlopen(request, timeout, context=None):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["context"] = context
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client._ship_with_retry([{"name": "evt"}])
+
+    assert captured["url"] == "http://localhost:8787/api/v1/events"
+    assert captured["timeout"] == 7.0
+    assert captured["context"] is None
 
 
 def test_event_client_close_wait_uses_event_timeout(monkeypatch):

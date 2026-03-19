@@ -1,8 +1,8 @@
 """Tests for BudgetGuard core behaviour (no real LLM calls)."""
-from contextlib import asynccontextmanager, contextmanager
 import asyncio
 import json
 import sys
+from contextlib import asynccontextmanager, contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,22 +15,19 @@ from actguard.core.budget_context import (
     _active_budget_contexts,
     _active_budget_states,
     _active_budget_states_lock,
-    add_cost,
     check_budget_limits,
-    get_budget_state,
     get_budget_stack,
+    get_budget_state,
     record_usage,
     reset_budget_state,
     set_budget_state,
 )
-from actguard.core.pricing import get_cost
 from actguard.core.state import get_current_state
 from actguard.exceptions import (
     BudgetConfigurationError,
     BudgetExceededError,
     MissingRuntimeContextError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake response helpers
@@ -224,34 +221,6 @@ def stub_budget_transport(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Pricing
-# ---------------------------------------------------------------------------
-
-class TestPricing:
-    def test_known_model(self):
-        # gpt-4o: $2.50 input / $10.00 output per 1M tokens
-        cost = get_cost("openai", "gpt-4o", 1_000_000, 0)
-        assert cost == pytest.approx(2.50)
-        cost = get_cost("openai", "gpt-4o", 0, 1_000_000)
-        assert cost == pytest.approx(10.00)
-
-    def test_anthropic_model(self):
-        # claude-3-haiku: $0.25 / $1.25 per 1M
-        cost = get_cost("anthropic", "claude-3-haiku-20240307", 1_000_000, 1_000_000)
-        assert cost == pytest.approx(1.50)
-
-    def test_unknown_model_warns_and_returns_zero(self):
-        with pytest.warns(UserWarning, match="no pricing entry"):
-            cost = get_cost("openai", "gpt-99-ultra", 100_000, 100_000)
-        assert cost == 0.0
-
-    def test_unknown_provider_warns(self):
-        with pytest.warns(UserWarning, match="no pricing entry"):
-            cost = get_cost("mystery_provider", "model-x", 1000, 1000)
-        assert cost == 0.0
-
-
-# ---------------------------------------------------------------------------
 # BudgetGuard context manager
 # ---------------------------------------------------------------------------
 
@@ -412,7 +381,6 @@ class TestBudgetGuardAsync:
                             input_tokens=10,
                             output_tokens=5,
                         )
-                        add_cost(0.25)
                         await asyncio.sleep(0)
                         return nested_guard
 
@@ -422,19 +390,12 @@ class TestBudgetGuardAsync:
                 )
 
             assert root_guard.tokens_used == 30
-            assert root_guard.usd_used == pytest.approx(0.5)
             assert root_guard.local_tokens_used == 0
-            assert root_guard.local_usd_used == pytest.approx(0.0)
             assert root_guard.root_tokens_used == 30
-            assert root_guard.root_usd_used == pytest.approx(0.5)
             assert search_guard.tokens_used == 15
-            assert search_guard.usd_used == pytest.approx(0.25)
             assert search_guard.local_tokens_used == 15
-            assert search_guard.local_usd_used == pytest.approx(0.25)
             assert search_guard.root_tokens_used == 30
-            assert search_guard.root_usd_used == pytest.approx(0.5)
             assert writer_guard.tokens_used == 15
-            assert writer_guard.usd_used == pytest.approx(0.25)
 
 
 # ---------------------------------------------------------------------------
@@ -524,17 +485,13 @@ class TestNestedBudgetScopes:
                             input_tokens=20,
                             output_tokens=10,
                         )
-                        add_cost(0.15)
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     pool.submit(worker).result()
 
             assert root_guard.tokens_used == 30
-            assert root_guard.usd_used == pytest.approx(0.15)
             assert root_guard.local_tokens_used == 0
-            assert root_guard.local_usd_used == pytest.approx(0.0)
             assert root_guard.root_tokens_used == 30
-            assert root_guard.root_usd_used == pytest.approx(0.15)
 
     def test_second_path_root_parameters_must_match_existing_root(self, monkeypatch):
         import concurrent.futures
@@ -553,7 +510,7 @@ class TestNestedBudgetScopes:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     pool.submit(worker).result()
 
-    def test_nested_parent_and_root_limits_are_walked(self, monkeypatch):
+    def test_nested_scopes_record_tokens_without_local_cost(self, monkeypatch):
         client = actguard.Client()
         monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-enforce")
         monkeypatch.setattr(client, "settle_budget", lambda **_: None)
@@ -568,35 +525,9 @@ class TestNestedBudgetScopes:
                             input_tokens=10,
                             output_tokens=5,
                         )
-                        add_cost(0.25)
+                        # No local cost tracking — usd_used stays 0
                         violation = check_budget_limits()
-                        assert violation is not None
-                        assert violation.blocked_scope.scope_name == "child"
-
-                with client.budget_guard(name="parent", usd_limit=0.4):
-                    with client.budget_guard(name="child"):
-                        record_usage(
-                            provider="openai",
-                            provider_model_id="gpt-4o-mini",
-                            input_tokens=10,
-                            output_tokens=5,
-                        )
-                        add_cost(0.45)
-                        violation = check_budget_limits()
-                        assert violation is not None
-                        assert violation.blocked_scope.scope_name == "parent"
-
-                with client.budget_guard(name="parent"):
-                    record_usage(
-                        provider="openai",
-                        provider_model_id="gpt-4o-mini",
-                        input_tokens=10,
-                        output_tokens=5,
-                    )
-                    add_cost(1.05)
-                    violation = check_budget_limits()
-                    assert violation is not None
-                    assert violation.blocked_scope.scope_kind == "root"
+                        assert violation is None
 
 # ---------------------------------------------------------------------------
 # OpenAI helper unit tests
@@ -650,10 +581,6 @@ class TestOpenAIHelpers:
 # ---------------------------------------------------------------------------
 
 class TestOpenAIIntegration:
-    # gpt-4o: $2.50/1M input, $10.00/1M output
-    # 100 prompt + 50 completion = (100*2.50 + 50*10.00) / 1_000_000 = 0.00075
-    _EXPECTED_COST = (100 * 2.50 + 50 * 10.00) / 1_000_000
-
     def test_sync_non_streaming_records_usage(self, openai_mocks):
         import openai
         sync_mock, _ = openai_mocks
@@ -664,7 +591,7 @@ class TestOpenAIIntegration:
             client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, openai_mocks):
@@ -677,7 +604,7 @@ class TestOpenAIIntegration:
             await client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     def test_sync_streaming_records_usage(self, openai_mocks):
         import openai
@@ -693,7 +620,7 @@ class TestOpenAIIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_usage(self, openai_mocks):
@@ -710,34 +637,9 @@ class TestOpenAIIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
-
-    def test_budget_limit_exceeded(self, openai_mocks):
-        import openai
-        sync_mock, _ = openai_mocks
-        sync_mock.return_value = _resp(200, 0)
-
-        client = openai.OpenAI(api_key="sk-test")
-        with pytest.raises(BudgetExceededError) as exc_info:
-            with _with_runtime_budget_guard(user_id="u1", usd_limit=0.0001):
-                client.chat.completions.create(model="gpt-4o", messages=[])
-        assert exc_info.value.limit_type == "usd"
-
-    def test_usd_limit_exceeded(self, openai_mocks):
-        import openai
-        sync_mock, _ = openai_mocks
-        sync_mock.return_value = _resp(1_000_000, 0)
-
-        client = openai.OpenAI(api_key="sk-test")
-        with pytest.raises(BudgetExceededError) as exc_info:
-            with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0):
-                client.chat.completions.create(model="gpt-4o", messages=[])
-        assert exc_info.value.limit_type == "usd"
-
+        assert guard.usd_used == 0.0
 
 class TestAnthropicIntegration:
-    _EXPECTED_COST = (100 * 0.25 + 50 * 1.25) / 1_000_000
-
     @staticmethod
     def _resp(input_tokens: int, output_tokens: int):
         return SimpleNamespace(
@@ -778,7 +680,7 @@ class TestAnthropicIntegration:
             )
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, anthropic_mocks):
@@ -796,7 +698,7 @@ class TestAnthropicIntegration:
             )
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     def test_sync_streaming_records_usage(self, anthropic_mocks):
         import anthropic
@@ -816,7 +718,7 @@ class TestAnthropicIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_usage(self, anthropic_mocks):
@@ -839,11 +741,12 @@ class TestAnthropicIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert guard.usd_used == 0.0
 
     def test_non_messages_endpoint_is_ignored(self, anthropic_mocks):
-        from anthropic._models import FinalRequestOptions
         from anthropic._base_client import SyncAPIClient
+        from anthropic._models import FinalRequestOptions
+
         from actguard.core.state import BudgetState
 
         sync_mock, _ = anthropic_mocks
@@ -869,38 +772,6 @@ class TestAnthropicIntegration:
 
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
-
-    def test_budget_limit_exceeded(self, anthropic_mocks):
-        import anthropic
-
-        sync_mock, _ = anthropic_mocks
-        sync_mock.return_value = self._resp(200, 0)
-
-        client = anthropic.Anthropic(api_key="test")
-        with pytest.raises(BudgetExceededError) as exc_info:
-            with _with_runtime_budget_guard(user_id="u1", usd_limit=0.00001):
-                client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=100,
-                    messages=[{"role": "user", "content": "hi"}],
-                )
-        assert exc_info.value.limit_type == "usd"
-
-    def test_usd_limit_exceeded(self, anthropic_mocks):
-        import anthropic
-
-        sync_mock, _ = anthropic_mocks
-        sync_mock.return_value = self._resp(1_000_000, 0)
-
-        client = anthropic.Anthropic(api_key="test")
-        with pytest.raises(BudgetExceededError) as exc_info:
-            with _with_runtime_budget_guard(user_id="u1", usd_limit=0.1):
-                client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=100,
-                    messages=[{"role": "user", "content": "hi"}],
-                )
-        assert exc_info.value.limit_type == "usd"
 
     def test_patch_anthropic_is_idempotent(self, anthropic_mocks):
         from anthropic._base_client import SyncAPIClient
@@ -968,8 +839,6 @@ def google_genai_stubs(monkeypatch):
 
 
 class TestGoogleGenAIPatch:
-    _EXPECTED_COST = (100 * 0.10 + 50 * 0.40) / 1_000_000
-
     def test_sync_non_streaming_records_usage(self, google_genai_stubs):
         from actguard.core.state import BudgetState
 
@@ -989,7 +858,7 @@ class TestGoogleGenAIPatch:
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 150
-        assert state.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert state.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, google_genai_stubs):
@@ -1011,7 +880,7 @@ class TestGoogleGenAIPatch:
             await client.async_request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 150
-        assert state.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert state.usd_used == 0.0
 
     def test_sync_streaming_records_latest_usage_once(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -1046,7 +915,7 @@ class TestGoogleGenAIPatch:
                 pass
 
         assert state.tokens_used == 150
-        assert state.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert state.usd_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_latest_usage_once(self, google_genai_stubs):
@@ -1083,7 +952,7 @@ class TestGoogleGenAIPatch:
                 pass
 
         assert state.tokens_used == 150
-        assert state.usd_used == pytest.approx(self._EXPECTED_COST)
+        assert state.usd_used == 0.0
 
     def test_non_generate_endpoint_not_recorded(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -1138,48 +1007,6 @@ class TestGoogleGenAIPatch:
         assert state.tokens_used == 0
         assert state.usd_used == 0.0
 
-    def test_budget_limit_exceeded(self, google_genai_stubs):
-        from actguard.core.state import BudgetState
-
-        BaseApiClient, google_mod = google_genai_stubs
-        google_mod.patch_google()
-
-        client = BaseApiClient()
-        client.sync_result = SimpleNamespace(
-            body=json.dumps(
-                {"usageMetadata": {"promptTokenCount": 200, "candidatesTokenCount": 0}}
-            ),
-            headers={},
-        )
-
-        state = BudgetState(user_id="u1", usd_limit=0.00001)
-        with _with_runtime_budget_state(state):
-            with pytest.raises(BudgetExceededError) as exc_info:
-                client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-
-        assert exc_info.value.limit_type == "usd"
-
-    def test_usd_limit_exceeded(self, google_genai_stubs):
-        from actguard.core.state import BudgetState
-
-        BaseApiClient, google_mod = google_genai_stubs
-        google_mod.patch_google()
-
-        client = BaseApiClient()
-        client.sync_result = SimpleNamespace(
-            body=json.dumps(
-                {"usageMetadata": {"promptTokenCount": 1_000_000, "candidatesTokenCount": 0}}
-            ),
-            headers={},
-        )
-
-        state = BudgetState(user_id="u1", usd_limit=0.09)
-        with _with_runtime_budget_state(state):
-            with pytest.raises(BudgetExceededError) as exc_info:
-                client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
-
-        assert exc_info.value.limit_type == "usd"
-
     def test_patch_google_is_idempotent(self, google_genai_stubs):
         BaseApiClient, google_mod = google_genai_stubs
         google_mod.patch_google()
@@ -1211,7 +1038,7 @@ class TestThreadFallback:
     def test_worker_thread_gets_budget_state(self):
         """ContextVar doesn't propagate to thread pool workers; fallback should."""
         import concurrent.futures
-        from actguard.core.state import BudgetState
+
 
         results = []
 
@@ -1228,8 +1055,8 @@ class TestThreadFallback:
 
     def test_multiple_active_states_returns_none(self):
         """When >1 active state exists, fallback must return None (ambiguous)."""
-        from actguard.core.state import BudgetState
         from actguard.core.budget_context import get_budget_state
+        from actguard.core.state import BudgetState
 
         state1 = BudgetState(run_id="r1")
         state2 = BudgetState(run_id="r2")
@@ -1250,6 +1077,7 @@ class TestThreadFallback:
     def test_concurrent_record_usage_correct_totals(self):
         """Multiple threads calling record_usage should produce correct totals."""
         import concurrent.futures
+
         from actguard.core.state import BudgetState
 
         state = BudgetState(user_id="u1", usd_limit=None)
@@ -1264,7 +1092,6 @@ class TestThreadFallback:
                     input_tokens=1,
                     output_tokens=1,
                 )
-                state.add_cost(0.001)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as pool:
             futs = [pool.submit(worker) for _ in range(n_threads)]
@@ -1275,7 +1102,6 @@ class TestThreadFallback:
         assert state.input_tokens == total
         assert state.output_tokens == total
         assert state.tokens_used == total * 2
-        assert state.usd_used == pytest.approx(total * 0.001)
 
     def test_fallback_cleaned_up_after_exit(self):
         """After budget_guard exits, worker threads should not see the state."""

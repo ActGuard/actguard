@@ -4,7 +4,6 @@ from typing import Literal
 
 from actguard.exceptions import ReportingContractError
 
-
 MetricSource = Literal["deterministic", "attributed", "mixed"]
 
 CANONICAL_USAGE_EVENT = ("llm", "usage")

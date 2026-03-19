@@ -75,11 +75,23 @@ _active_states: Dict[int, RunState] = {}
 _active_states_lock: Lock = Lock()
 
 
+def _in_async_context() -> bool:
+    """True when running inside an asyncio event loop."""
+    try:
+        import asyncio
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
 def get_run_state() -> Optional[RunState]:
     state = _run_state.get()
     if state is not None:
         return state
-    # Fallback: if exactly one active state, return it (safe for single-guard case)
+    # Fallback only for worker threads — async tasks have proper ContextVar isolation
+    if _in_async_context():
+        return None
     with _active_states_lock:
         if len(_active_states) == 1:
             return next(iter(_active_states.values()))

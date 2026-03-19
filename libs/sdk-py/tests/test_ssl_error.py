@@ -3,23 +3,26 @@ import ssl
 import urllib.error
 from unittest.mock import patch
 
+import certifi
 import pytest
 
 from actguard._monitoring import (
-    SSL_CERT_FIX_MESSAGE,
     ActGuardMonitoringWarning,
     _failure_kind,
     _is_ssl_cert_error,
+    warn_monitoring_issue,
 )
 from actguard.exceptions import BudgetTransportError
-
+from actguard.transport import _urllib as urllib_transport
 
 # ---------------------------------------------------------------------------
 # _is_ssl_cert_error helper
 # ---------------------------------------------------------------------------
 
 
-def _make_ssl_cert_error(msg="[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"):
+def _make_ssl_cert_error(
+    msg="[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed",
+):
     """Build an ssl.SSLCertVerificationError (verify_code=1)."""
     exc = ssl.SSLCertVerificationError(1, msg)
     return exc
@@ -30,7 +33,10 @@ class TestIsSSLCertError:
         assert _is_ssl_cert_error(_make_ssl_cert_error()) is True
 
     def test_ssl_error_with_cert_verify_string(self):
-        exc = ssl.SSLError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        exc = ssl.SSLError(
+            1,
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed",
+        )
         assert _is_ssl_cert_error(exc) is True
 
     def test_wrapped_in_urlerror(self):
@@ -68,6 +74,38 @@ class TestFailureKindSSL:
         assert _failure_kind(outer, status_code=None) == "ssl_cert"
 
 
+class TestUrlopenSSLContext:
+    def test_https_uses_certifi_bundle(self):
+        sentinel = object()
+
+        with patch.object(
+            certifi, "where", return_value="/tmp/certifi.pem"
+        ) as where_mock:
+            with patch.object(
+                ssl,
+                "create_default_context",
+                return_value=sentinel,
+            ) as create_mock:
+                context = urllib_transport._ssl_context_for_url(
+                    "https://api.actguard.ai/api/v1/health"
+                )
+
+        assert context is sentinel
+        where_mock.assert_called_once_with()
+        create_mock.assert_called_once_with(cafile="/tmp/certifi.pem")
+
+    def test_http_omits_ssl_context(self):
+        with patch.object(certifi, "where") as where_mock:
+            with patch.object(ssl, "create_default_context") as create_mock:
+                context = urllib_transport._ssl_context_for_url(
+                    "http://localhost:8787/api/v1/health"
+                )
+
+        assert context is None
+        where_mock.assert_not_called()
+        create_mock.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # BudgetTransport.post() — immediate raise, no retries
 # ---------------------------------------------------------------------------
@@ -88,7 +126,10 @@ class TestBudgetTransportSSL:
         url_error = urllib.error.URLError(ssl_exc)
 
         with patch("urllib.request.urlopen", side_effect=url_error):
-            with pytest.raises(BudgetTransportError, match="SSL certificate verification failed"):
+            with pytest.raises(
+                BudgetTransportError,
+                match="SSL certificate verification failed",
+            ):
                 transport.post(path="/api/v1/budget/reserve", payload={"foo": "bar"})
 
     def test_no_retries_on_ssl_error(self):
@@ -135,6 +176,27 @@ class TestEventClientSSL:
         url_error = urllib.error.URLError(ssl_exc)
 
         with patch("urllib.request.urlopen", side_effect=url_error) as mock_urlopen:
-            with pytest.warns(ActGuardMonitoringWarning, match="ssl_cert"):
+            with pytest.warns(
+                ActGuardMonitoringWarning,
+                match="SSL certificate verification failed",
+            ):
                 client._ship_with_retry([{"event": "test"}])
             assert mock_urlopen.call_count == 1
+
+
+class TestMonitoringWarningSummary:
+    def test_warn_monitoring_issue_preserves_ssl_guidance(self):
+        ssl_exc = _make_ssl_cert_error()
+        url_error = urllib.error.URLError(ssl_exc)
+
+        with pytest.warns(ActGuardMonitoringWarning) as recorded:
+            warn_monitoring_issue(
+                subsystem="budget",
+                operation="settle",
+                exc=url_error,
+                path="/api/v1/settle",
+            )
+
+        warning = recorded[0].message
+        assert warning.error.failure_kind == "ssl_cert"
+        assert "SSL certificate verification failed" in str(warning)
