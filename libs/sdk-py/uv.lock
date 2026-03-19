@@ -9,6 +9,9 @@ resolution-markers = [
 [[package]]
 name = "actguard"
 source = { editable = "." }
+dependencies = [
+    { name = "certifi" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -29,6 +32,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.1.4" },
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=0.83.0" },
     { name = "openai", marker = "extra == 'dev'", specifier = ">=1.76.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },

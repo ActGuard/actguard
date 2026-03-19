@@ -12,6 +12,8 @@ from actguard.events.client import EventClient
 from actguard.integrations.manager import IntegrationBootstrap
 from actguard.transport.budget_api import BudgetTransport
 
+DEFAULT_GATEWAY_URL = "https://api.actguard.ai"
+
 
 class Client:
     def __init__(
@@ -19,6 +21,7 @@ class Client:
         *,
         api_key: Optional[str] = None,
         gateway_url: Optional[str] = None,
+        debug: bool = False,
         event_mode: str = "verbose",
         flush_interval_ms: int = 1000,
         max_batch_events: int = 100,
@@ -57,8 +60,13 @@ class Client:
             if event_max_retries is None:
                 resolved_event_max_retries = max_retries
 
+        resolved_gateway_url = (
+            gateway_url if gateway_url is not None else DEFAULT_GATEWAY_URL
+        )
+
         self.api_key = api_key
-        self.gateway_url = gateway_url
+        self.gateway_url = resolved_gateway_url
+        self.debug = debug
         self.event_mode = event_mode
         self.flush_interval_ms = flush_interval_ms
         self.max_batch_events = max_batch_events
@@ -78,8 +86,9 @@ class Client:
         self.backoff_max_ms = backoff_max_ms
 
         self._config = ActGuardConfig(
-            gateway_url=gateway_url,
+            gateway_url=resolved_gateway_url,
             api_key=api_key,
+            debug=debug,
             event_mode=event_mode,
             flush_interval_ms=flush_interval_ms,
             max_batch_events=max_batch_events,
@@ -129,26 +138,6 @@ class Client:
         from actguard.budget import BudgetGuard
 
         return BudgetGuard(
-            client=self,
-            user_id=user_id,
-            name=name,
-            usd_limit=usd_limit,
-            run_id=run_id,
-            plan_key=plan_key,
-        )
-
-    def request_budget_session(
-        self,
-        *,
-        user_id: Optional[str] = None,
-        name: Optional[str] = None,
-        usd_limit: Optional[float] = None,
-        run_id: Optional[str] = None,
-        plan_key: Optional[str] = None,
-    ):
-        from actguard.lazy_budget_session import LazyRequestBudgetSession
-
-        return LazyRequestBudgetSession(
             client=self,
             user_id=user_id,
             name=name,
@@ -245,6 +234,7 @@ class Client:
         return cls(
             api_key=data.get("api_key"),
             gateway_url=data.get("gateway_url"),
+            debug=bool(data.get("debug", False)),
             event_mode=data.get("event_mode", "verbose"),
             flush_interval_ms=data.get("flush_interval_ms", 1000),
             max_batch_events=data.get("max_batch_events", 100),

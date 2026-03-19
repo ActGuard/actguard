@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import re
 from typing import Iterator
 
@@ -11,6 +12,8 @@ from actguard.core.budget_context import (
 from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
 from actguard.reporting import emit_usage_event
+
+logger = logging.getLogger("actguard.integrations.openai")
 
 _patched = False
 
@@ -243,6 +246,7 @@ def patch_openai() -> None:
 
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
+        logger.debug("openai patch _request: state=%s, recorder=%s", state, get_current_budget_recorder())
         if state is None and get_current_budget_recorder() is None:
             return _orig_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
@@ -269,6 +273,7 @@ def patch_openai() -> None:
 
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
+        logger.debug("openai patch _async_request: state=%s, recorder=%s", state, get_current_budget_recorder())
         if state is None and get_current_budget_recorder() is None:
             return await _orig_async_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls

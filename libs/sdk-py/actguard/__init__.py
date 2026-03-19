@@ -9,7 +9,6 @@ from .exceptions import (
     ActGuardToolError,
     MonitoringDegradedError,
 )
-from .lazy_budget_session import LazyRequestBudgetSession
 from .reporting import emit_event, emit_violation
 from .session import session
 from .tools import (
@@ -40,7 +39,6 @@ __all__ = [
     "BlockRegex",
     "BudgetGuard",
     "Client",
-    "LazyRequestBudgetSession",
     "circuit_breaker",
     "emit_event",
     "emit_violation",

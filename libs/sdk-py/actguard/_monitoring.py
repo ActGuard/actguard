@@ -16,7 +16,8 @@ SSL_CERT_FIX_MESSAGE = (
     "    /Applications/Python 3.x/ or run:\n"
     "      pip install --upgrade certifi\n"
     "      /Applications/Python\\ 3.*/Install\\ Certificates.command\n"
-    "  • Other systems: pip install --upgrade certifi && export SSL_CERT_FILE=$(python3 -m certifi)\n"
+    "  • Other systems: pip install --upgrade certifi && export "
+    "SSL_CERT_FILE=$(python3 -m certifi)\n"
     "  • Or set the SSL_CERT_FILE environment variable to a valid CA bundle path."
 )
 
@@ -47,6 +48,7 @@ def monitoring_error_from_exception(
         cause=exc,
         path=path,
         status_code=status_code,
+        summary=_failure_summary(exc, status_code=status_code),
     )
 
 
@@ -92,17 +94,23 @@ def _status_code(exc: BaseException) -> int | None:
 
 
 def _is_ssl_cert_error(exc: BaseException) -> bool:
-    """Return True if *exc* (or any chained cause) is an SSL certificate verification error."""
+    """Return True if *exc* or any chained cause is a certificate verification error."""
     for current in _error_chain(exc):
         if isinstance(current, ssl.SSLCertVerificationError):
             return True
-        if isinstance(current, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(current):
+        if (
+            isinstance(current, ssl.SSLError)
+            and "CERTIFICATE_VERIFY_FAILED" in str(current)
+        ):
             return True
         if isinstance(current, urllib.error.URLError):
             reason = current.reason
             if isinstance(reason, ssl.SSLCertVerificationError):
                 return True
-            if isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason):
+            if (
+                isinstance(reason, ssl.SSLError)
+                and "CERTIFICATE_VERIFY_FAILED" in str(reason)
+            ):
                 return True
     return False
 
@@ -137,6 +145,30 @@ def _failure_kind(exc: BaseException, *, status_code: int | None) -> str:
     return "unknown"
 
 
+def _failure_summary(exc: BaseException, *, status_code: int | None) -> str | None:
+    chain = _error_chain(exc)
+    if not chain:
+        return None
+
+    if _is_ssl_cert_error(exc):
+        return _normalize_summary(SSL_CERT_FIX_MESSAGE, preserve_multiline=True)
+
+    if status_code is not None:
+        message = _normalize_summary(_outer_message(chain))
+        if message is None:
+            return f"status {status_code}"
+        if f"status {status_code}" in message.lower():
+            return message
+        return f"status {status_code}: {message}"
+
+    detail_exc = _deepest_meaningful_exception(chain)
+    message = _normalize_summary(_exception_message(detail_exc))
+    exc_type = type(detail_exc).__name__
+    if message and message.lower() != exc_type.lower():
+        return f"{exc_type}: {message}"
+    return exc_type or None
+
+
 def _is_connection_reason(value: object) -> bool:
     if isinstance(value, ConnectionError):
         return True
@@ -152,6 +184,44 @@ def _is_connection_reason(value: object) -> bool:
     }:
         return True
     return False
+
+
+def _outer_message(chain: list[BaseException]) -> str | None:
+    for current in chain:
+        message = _exception_message(current)
+        if _normalize_summary(message) is not None:
+            return message
+    return None
+
+
+def _deepest_meaningful_exception(chain: list[BaseException]) -> BaseException:
+    for current in reversed(chain):
+        if _normalize_summary(_exception_message(current)) is not None:
+            return current
+    return chain[-1]
+
+
+def _exception_message(exc: BaseException) -> str | None:
+    message = getattr(exc, "message", None)
+    if isinstance(message, str) and message.strip():
+        return message
+    rendered = str(exc)
+    return rendered if rendered.strip() else None
+
+
+def _normalize_summary(
+    text: str | None,
+    *,
+    preserve_multiline: bool = False,
+) -> str | None:
+    if text is None:
+        return None
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    if preserve_multiline:
+        return cleaned
+    return " ".join(cleaned.split()).rstrip(".")
 
 
 def _error_chain(exc: BaseException) -> list[BaseException]:

@@ -11,6 +11,7 @@ import urllib.request
 from typing import TYPE_CHECKING, Optional
 
 from actguard._monitoring import warn_monitoring_issue
+from actguard.transport._urllib import start_debug_trace, urlopen
 
 if TYPE_CHECKING:
     from actguard._config import ActGuardConfig
@@ -109,15 +110,28 @@ class EventClient:
                 req = urllib.request.Request(
                     url, data=body, headers=headers, method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=timeout_s):
+                trace = start_debug_trace(
+                    request=req,
+                    timeout=timeout_s,
+                    debug=self._config.debug,
+                    attempt=attempt + 1,
+                    max_attempts=max_retries + 1,
+                )
+                with urlopen(req, timeout=timeout_s) as response:
+                    if trace is not None:
+                        trace.log_success(response=response, body=None)
                     return  # success
             except urllib.error.HTTPError as exc:
+                if trace is not None:
+                    trace.log_failure(exc=exc)
                 last_error = exc
                 status = exc.code
                 if status in (400, 401, 403):
                     break
                 # 429, 5xx → retry
             except Exception as exc:
+                if trace is not None:
+                    trace.log_failure(exc=exc)
                 from actguard._monitoring import (
                     _is_ssl_cert_error,
                 )

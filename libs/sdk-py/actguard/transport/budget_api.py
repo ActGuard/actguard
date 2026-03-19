@@ -8,6 +8,7 @@ import urllib.request
 from typing import Any, Mapping, Optional
 
 from actguard._config import ActGuardConfig
+from actguard.transport._urllib import start_debug_trace, urlopen
 
 
 class BudgetTransport:
@@ -41,6 +42,7 @@ class BudgetTransport:
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0 and attempt > 0:
                 break
+            timeout_s = max(remaining_s, 0.001)
             try:
                 req = urllib.request.Request(
                     url,
@@ -48,10 +50,17 @@ class BudgetTransport:
                     headers=headers,
                     method="POST",
                 )
-                with urllib.request.urlopen(
-                    req, timeout=max(remaining_s, 0.001)
-                ) as response:
+                trace = start_debug_trace(
+                    request=req,
+                    timeout=timeout_s,
+                    debug=self._config.debug,
+                    attempt=attempt + 1,
+                    max_attempts=self._config.budget_max_retries + 1,
+                )
+                with urlopen(req, timeout=timeout_s) as response:
                     raw = response.read()
+                if trace is not None:
+                    trace.log_success(response=response, body=raw)
                 if not raw:
                     return {}
                 parsed = json.loads(raw.decode())
@@ -59,19 +68,27 @@ class BudgetTransport:
                     return parsed
                 return {}
             except urllib.error.HTTPError as exc:
+                if trace is not None:
+                    trace.log_failure(exc=exc)
                 status = exc.code
                 if status == 402:
                     raise ActGuardPaymentRequired(
                         path=path, status=status, cause=exc
                     ) from exc
-                if status in (400, 401, 403, 422):
+                if status in (400, 401, 403, 409, 422):
                     raise BudgetTransportError(
-                        f"Budget API request failed with status {status} at {path}.",
+                        _budget_http_error_message(
+                            status=status,
+                            path=path,
+                            exc=exc,
+                        ),
                         cause=exc,
                         status_code=status,
                     ) from exc
                 last_error = exc
             except Exception as exc:
+                if trace is not None:
+                    trace.log_failure(exc=exc)
                 from actguard._monitoring import (
                     SSL_CERT_FIX_MESSAGE,
                     _is_ssl_cert_error,
@@ -100,3 +117,41 @@ class BudgetTransport:
             f"Budget API request failed at {path}: {type(last_error).__name__}",
             cause=last_error,
         ) from last_error
+
+
+def _budget_http_error_message(
+    *,
+    status: int,
+    path: str,
+    exc: urllib.error.HTTPError,
+) -> str:
+    detail = _http_error_detail(exc)
+    if detail:
+        return f"Budget API request failed with status {status} at {path}: {detail}"
+    return f"Budget API request failed with status {status} at {path}."
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str | None:
+    try:
+        raw = exc.read()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    stripped = " ".join(decoded.strip().split())
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return stripped
+    if isinstance(parsed, dict):
+        for key in ("error", "message", "detail"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return stripped
