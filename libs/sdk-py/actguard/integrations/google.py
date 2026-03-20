@@ -12,6 +12,7 @@ from actguard.core.budget_context import (
 )
 from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
+from actguard.integrations.usage import extract_usage_info
 from actguard.reporting import emit_usage_event
 
 _patched = False
@@ -334,9 +335,14 @@ def patch_google() -> None:
         model = _model_from_path(path)
 
         result = _orig_request(self, *args, **kwargs)
-        tokens = _extract_usage_tokens(result)
-        if tokens is not None:
-            _record_usage(state, model, *tokens)
+        usage = extract_usage_info(result, provider="google", model=model)
+        if usage is not None:
+            _record_usage(
+                state,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+            )
         _check_limits(state)
         return result
 
@@ -366,9 +372,14 @@ def patch_google() -> None:
         model = _model_from_path(path)
 
         result = await _orig_async_request(self, *args, **kwargs)
-        tokens = _extract_usage_tokens(result)
-        if tokens is not None:
-            _record_usage(state, model, *tokens)
+        usage = extract_usage_info(result, provider="google", model=model)
+        if usage is not None:
+            _record_usage(
+                state,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+            )
         _check_limits(state)
         return result
 

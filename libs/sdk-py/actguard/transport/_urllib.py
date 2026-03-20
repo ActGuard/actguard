@@ -12,6 +12,8 @@ from typing import Any
 
 import certifi
 
+from actguard._debug import format_transport_debug
+
 
 def urlopen(
     request: Any,
@@ -212,7 +214,7 @@ def _debug_write(*parts: str) -> None:
     filtered = [part for part in parts if part]
     if not filtered:
         return
-    print("[actguard debug]", *filtered, file=sys.stderr)
+    print(format_transport_debug(filtered, stream=sys.stderr), file=sys.stderr)
 
 
 def start_debug_trace(

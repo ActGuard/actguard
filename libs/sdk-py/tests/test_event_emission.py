@@ -8,8 +8,10 @@ import pytest
 
 import actguard
 import actguard.integrations.openai as _oai_mod
+from actguard.core.budget_context import get_budget_state
 from actguard.events.envelope import ActGuardContextEvidenceProvider
 from actguard.exceptions import BudgetExceededError
+from actguard.reporting import record_response_usage
 
 
 @pytest.fixture()
@@ -19,7 +21,11 @@ def client(monkeypatch):
         api_key="test-key",
     )
     assert runtime_client.event_client is not None
-    monkeypatch.setattr(runtime_client.event_client, "_ship_with_retry", lambda batch: None)
+    monkeypatch.setattr(
+        runtime_client.event_client,
+        "_ship_with_retry",
+        lambda batch: None,
+    )
     try:
         yield runtime_client
     finally:
@@ -93,7 +99,9 @@ def test_budget_exceeded_emits_violation_event(
     assert envelope.payload["limit_type"] == "usd"
 
 
-def test_budget_guard_events_include_run_id(client, emitted_events, stub_budget_transport):
+def test_budget_guard_events_include_run_id(
+    client, emitted_events, stub_budget_transport
+):
     with client.run(user_id="alice", run_id="run-ctx"):
         with client.budget_guard(user_id="alice", usd_limit=0.05) as guard:
             actguard.emit_event("tool", "invoke", {})
@@ -296,6 +304,38 @@ def test_emit_event_promotes_usage_fields_from_payload(client, emitted_events):
     assert wire["usd_micros"] == 123_456
 
 
+def test_emit_event_promotes_langchain_openai_usage_from_raw_payload(
+    client, emitted_events
+):
+    raw = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 31,
+            "output_tokens": 5,
+            "input_token_details": {"cache_read": 7},
+        },
+        response_metadata={
+            "model_name": "gpt-4o",
+            "token_usage": {"prompt_tokens": 31, "completion_tokens": 5},
+        },
+    )
+
+    with client.run(run_id="run-usage-from-raw"):
+        actguard.emit_event("tool", "invoke", {"raw": raw})
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "tool" and env.name == "invoke"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    assert envelope.provider == "openai"
+    assert envelope.model == "gpt-4o"
+    assert envelope.input_tokens == 31
+    assert envelope.cached_input_tokens == 7
+    assert envelope.output_tokens == 5
+
+
 def test_emit_event_omits_top_level_usage_fields_when_unknown(client, emitted_events):
     with client.run(run_id="run-usage-unknown"):
         actguard.emit_event("tool", "invoke", {"tokens_used": 0})
@@ -322,6 +362,122 @@ def test_no_event_emission_without_active_runtime_context(client, emitted_events
         env
         for env in emitted_events
         if env.category == "tool" and env.name == "invoke"
+    ]
+    assert matches == []
+
+
+def test_record_response_usage_records_openai_langchain_message(
+    client, emitted_events, stub_budget_transport
+):
+    raw = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 31,
+            "output_tokens": 5,
+            "input_token_details": {"cache_read": 7},
+        },
+        response_metadata={
+            "model_name": "gpt-4o",
+            "token_usage": {"prompt_tokens": 31, "completion_tokens": 5},
+        },
+    )
+
+    with client.run(run_id="run-openai-wrapper", user_id="alice"):
+        with client.budget_guard(name="search_tool", usd_limit=1.0):
+            assert record_response_usage({"raw": raw}, provider="openai")
+            state = get_budget_state()
+            assert state is not None
+            assert state.provider_model_id == "gpt-4o"
+            assert state.input_tokens == 31
+            assert state.cached_input_tokens == 7
+            assert state.output_tokens == 5
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    assert envelope.provider == "openai"
+    assert envelope.model == "gpt-4o"
+    assert envelope.input_tokens == 31
+    assert envelope.cached_input_tokens == 7
+    assert envelope.output_tokens == 5
+
+
+def test_record_response_usage_infers_anthropic_provider_from_model(
+    client, emitted_events, stub_budget_transport
+):
+    raw = SimpleNamespace(
+        usage_metadata={"input_tokens": 11, "output_tokens": 7},
+        response_metadata={
+            "model": "claude-3-5-sonnet-latest",
+            "usage": {"input_tokens": 11, "output_tokens": 7},
+        },
+    )
+
+    with client.run(run_id="run-anthropic-wrapper", user_id="alice"):
+        with client.budget_guard(name="search_tool", usd_limit=1.0):
+            assert record_response_usage(raw)
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    assert envelope.provider == "anthropic"
+    assert envelope.model == "claude-3-5-sonnet-latest"
+    assert envelope.input_tokens == 11
+    assert envelope.output_tokens == 7
+
+
+def test_record_response_usage_infers_google_provider_from_response_metadata(
+    client, emitted_events, stub_budget_transport
+):
+    raw = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 24,
+            "input_token_details": {"cache_read": 0},
+        },
+        response_metadata={
+            "model_name": "gemini-3.1-pro-preview",
+            "model_provider": "google_genai",
+        },
+    )
+
+    with client.run(run_id="run-google-wrapper", user_id="alice"):
+        with client.budget_guard(name="search_tool", usd_limit=1.0):
+            assert record_response_usage(raw)
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
+    ]
+    assert len(matches) == 1
+    envelope = matches[0]
+    assert envelope.provider == "google"
+    assert envelope.model == "gemini-3.1-pro-preview"
+    assert envelope.input_tokens == 10
+    assert envelope.output_tokens == 24
+
+
+def test_record_response_usage_returns_false_when_usage_missing(
+    client, emitted_events, stub_budget_transport
+):
+    raw = SimpleNamespace(response_metadata={"model_name": "gpt-4o"})
+
+    with client.run(run_id="run-no-usage", user_id="alice"):
+        with client.budget_guard(name="search_tool", usd_limit=1.0):
+            assert not record_response_usage(raw, provider="openai")
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
     ]
     assert matches == []
 

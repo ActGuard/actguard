@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import urllib.error
 import urllib.request
 
+import pytest
+
 import actguard
+from actguard import _debug as debug_utils
 from actguard._config import ActGuardConfig
 from actguard.events.client import EventClient
 from actguard.transport import _urllib as urllib_transport
@@ -27,6 +31,25 @@ class _FakeResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+@pytest.fixture(autouse=True)
+def reset_actguard_debug_handler():
+    logger = logging.getLogger("actguard")
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    original_propagate = logger.propagate
+    logger.handlers = [
+        handler
+        for handler in logger.handlers
+        if not getattr(handler, "_actguard_debug_handler", False)
+    ]
+    try:
+        yield
+    finally:
+        logger.handlers = original_handlers
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
 
 
 def test_client_debug_flag_propagates_to_config_and_file_loading(tmp_path):
@@ -170,3 +193,54 @@ def test_debug_mode_off_emits_no_console_output(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+def test_transport_debug_uses_color_when_enabled(monkeypatch, capsys):
+    request = urllib.request.Request(
+        "https://gw.example/api/v1/debug",
+        data=b'{"ok":true}',
+        method="POST",
+    )
+
+    monkeypatch.setattr(debug_utils, "use_color", lambda stream=None: True)
+
+    trace = urllib_transport.start_debug_trace(
+        request=request,
+        timeout=1.0,
+        debug=True,
+    )
+    assert trace is not None
+
+    captured = capsys.readouterr()
+    assert "\x1b[" in captured.err
+    assert "[actguard debug]" in captured.err
+    assert "request" in captured.err
+
+
+def test_client_debug_installs_one_actguard_handler():
+    actguard.Client(debug=True, event_mode="off")
+    actguard.Client(debug=True, event_mode="off")
+
+    logger = logging.getLogger("actguard")
+    handlers = [
+        handler
+        for handler in logger.handlers
+        if getattr(handler, "_actguard_debug_handler", False)
+    ]
+    assert len(handlers) == 1
+    assert logger.level == logging.DEBUG
+    assert logger.propagate is False
+
+
+def test_client_debug_logger_output_is_colorized(monkeypatch, capsys):
+    monkeypatch.setattr(debug_utils, "use_color", lambda stream=None: True)
+    actguard.Client(debug=True, event_mode="off")
+
+    logger = logging.getLogger("actguard.integrations.openai")
+    logger.debug("hello debug")
+
+    captured = capsys.readouterr()
+    assert "\x1b[" in captured.err
+    assert "[actguard]" in captured.err
+    assert "DEBUG" in captured.err
+    assert "hello debug" in captured.err

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from actguard._config import ActGuardConfig
+from actguard._debug import ensure_actguard_debug_handler
 from actguard.core.runtime import ClientRunContext
 from actguard.events.client import EventClient
 from actguard.integrations.manager import IntegrationBootstrap
@@ -84,6 +85,9 @@ class Client:
         self.event_max_retries = resolved_event_max_retries
         self.backoff_base_ms = backoff_base_ms
         self.backoff_max_ms = backoff_max_ms
+
+        if debug:
+            ensure_actguard_debug_handler()
 
         self._config = ActGuardConfig(
             gateway_url=resolved_gateway_url,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 
 from actguard._monitoring import warn_monitoring_issue
+from actguard.integrations.usage import extract_usage_info
 
 
 def _runtime_event_client_and_config() -> Tuple[object, object]:
@@ -187,23 +188,49 @@ def _resolve_usage_fields(
     dict,
     Optional[str],
 ]:
+    usage_info = None
+    if (
+        not model
+        or not provider
+        or input_tokens is None
+        or cached_input_tokens is None
+        or output_tokens is None
+    ):
+        usage_candidate = _usage_candidate_from_payload(payload)
+        if usage_candidate is not None:
+            usage_info = extract_usage_info(
+                usage_candidate,
+                provider=provider,
+                model=model,
+            )
+
     if not model:
         payload_model = payload.get("model")
         if isinstance(payload_model, str) and payload_model:
             model = payload_model
+    if not model and usage_info is not None:
+        model = usage_info.model
     if not provider:
         payload_provider = payload.get("provider")
         if isinstance(payload_provider, str) and payload_provider:
             provider = payload_provider
+    if not provider and usage_info is not None:
+        provider = usage_info.provider
 
     if usd_micros is None:
         usd_micros = _optional_int(payload.get("usd_micros"))
     if input_tokens is None:
         input_tokens = _optional_int(payload.get("input_tokens"))
+    if input_tokens is None and usage_info is not None:
+        input_tokens = usage_info.input_tokens
     if cached_input_tokens is None:
         cached_input_tokens = _optional_int(payload.get("cached_input_tokens"))
+    if cached_input_tokens is None and usage_info is not None:
+        cached_input_tokens = usage_info.cached_input_tokens
     if output_tokens is None:
         output_tokens = _optional_int(payload.get("output_tokens"))
+    if output_tokens is None and usage_info is not None:
+        output_tokens = usage_info.output_tokens
     if not tool_name:
         payload_tool_name = payload.get("tool_name")
         if isinstance(payload_tool_name, str) and payload_tool_name:
@@ -229,6 +256,16 @@ def _resolve_usage_fields(
         scope_fields,
         plan_key,
     )
+
+
+def _usage_candidate_from_payload(payload: dict) -> Any:
+    for key in ("raw", "response", "result"):
+        if key in payload:
+            return payload[key]
+    usage_keys = ("usage_metadata", "response_metadata", "usage", "body")
+    if any(key in payload for key in usage_keys):
+        return payload
+    return None
 
 
 def _with_runtime_metadata(payload: dict) -> dict:

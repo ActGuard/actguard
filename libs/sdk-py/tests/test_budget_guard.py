@@ -69,6 +69,26 @@ class _AsyncIter:
             yield item
 
 
+class _SyncParsedResponseWrapper:
+    def __init__(self, parsed):
+        self._parsed = parsed
+        self.parse_calls = 0
+
+    def parse(self):
+        self.parse_calls += 1
+        return self._parsed
+
+
+class _AsyncParsedResponseWrapper:
+    def __init__(self, parsed):
+        self._parsed = parsed
+        self.parse_calls = 0
+
+    async def parse(self):
+        self.parse_calls += 1
+        return self._parsed
+
+
 @contextmanager
 def _with_runtime_budget_state(state):
     client = actguard.Client()
@@ -593,6 +613,21 @@ class TestOpenAIIntegration:
         assert guard.tokens_used == 150
         assert guard.usd_used == 0.0
 
+    def test_sync_non_streaming_records_usage_from_parsed_wrapper(self, openai_mocks):
+        import openai
+
+        sync_mock, _ = openai_mocks
+        wrapped = _SyncParsedResponseWrapper(_resp(100, 50))
+        sync_mock.return_value = wrapped
+
+        client = openai.OpenAI(api_key="sk-test")
+        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+            client.chat.completions.create(model="gpt-4o", messages=[])
+
+        assert wrapped.parse_calls == 1
+        assert guard.tokens_used == 150
+        assert guard.usd_used == 0.0
+
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, openai_mocks):
         import openai
@@ -603,6 +638,24 @@ class TestOpenAIIntegration:
         async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
             await client.chat.completions.create(model="gpt-4o", messages=[])
 
+        assert guard.tokens_used == 150
+        assert guard.usd_used == 0.0
+
+    @pytest.mark.asyncio
+    async def test_async_non_streaming_records_usage_from_parsed_wrapper(
+        self, openai_mocks
+    ):
+        import openai
+
+        _, async_mock = openai_mocks
+        wrapped = _AsyncParsedResponseWrapper(_resp(100, 50))
+        async_mock.return_value = wrapped
+
+        client = openai.AsyncOpenAI(api_key="sk-test")
+        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+            await client.chat.completions.create(model="gpt-4o", messages=[])
+
+        assert wrapped.parse_calls == 1
         assert guard.tokens_used == 150
         assert guard.usd_used == 0.0
 

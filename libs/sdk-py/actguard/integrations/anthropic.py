@@ -9,6 +9,7 @@ from actguard.core.budget_context import (
 )
 from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
+from actguard.integrations.usage import extract_usage_info
 from actguard.reporting import emit_usage_event
 
 _patched = False
@@ -213,12 +214,13 @@ def patch_anthropic() -> None:
         response = _orig_request(
             self, cast_to, options, stream=stream, stream_cls=stream_cls
         )
-        if response.usage is not None:
+        usage = extract_usage_info(response, provider="anthropic", model=model)
+        if usage is not None:
             _record_usage(
                 state,
-                model,
-                getattr(response.usage, "input_tokens", 0) or 0,
-                getattr(response.usage, "output_tokens", 0) or 0,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
             )
         _check_limits(state)
         return response
@@ -246,12 +248,13 @@ def patch_anthropic() -> None:
         response = await _orig_async_request(
             self, cast_to, options, stream=stream, stream_cls=stream_cls
         )
-        if response.usage is not None:
+        usage = extract_usage_info(response, provider="anthropic", model=model)
+        if usage is not None:
             _record_usage(
                 state,
-                model,
-                getattr(response.usage, "input_tokens", 0) or 0,
-                getattr(response.usage, "output_tokens", 0) or 0,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
             )
         _check_limits(state)
         return response

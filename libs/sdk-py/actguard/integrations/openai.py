@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import logging
 import re
 from typing import Iterator
@@ -11,6 +12,7 @@ from actguard.core.budget_context import (
 )
 from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
+from actguard.integrations.usage import extract_usage_info
 from actguard.reporting import emit_usage_event
 
 logger = logging.getLogger("actguard.integrations.openai")
@@ -148,6 +150,89 @@ def _try_stream_usage(chunk):
     return None
 
 
+def _extract_result_usage(result, *, model: str):
+    usage = extract_usage_info(result, provider="openai", model=model)
+    if usage is not None:
+        return usage
+
+    parse = getattr(result, "parse", None)
+    if not callable(parse):
+        logger.debug(
+            "openai patch _request: no usage found on result type=%s model=%s",
+            type(result).__name__,
+            model,
+        )
+        return None
+
+    parsed = parse()
+    usage = extract_usage_info(parsed, provider="openai", model=model)
+    if usage is not None:
+        logger.debug(
+            (
+                "openai patch _request: usage recovered via parse "
+                "type=%s parsed_type=%s model=%s"
+            ),
+            type(result).__name__,
+            type(parsed).__name__,
+            model,
+        )
+        return usage
+
+    logger.debug(
+        (
+            "openai patch _request: no usage found after parse "
+            "type=%s parsed_type=%s model=%s"
+        ),
+        type(result).__name__,
+        type(parsed).__name__,
+        model,
+    )
+    return None
+
+
+async def _extract_async_result_usage(result, *, model: str):
+    usage = extract_usage_info(result, provider="openai", model=model)
+    if usage is not None:
+        return usage
+
+    parse = getattr(result, "parse", None)
+    if not callable(parse):
+        logger.debug(
+            "openai patch _async_request: no usage found on result type=%s model=%s",
+            type(result).__name__,
+            model,
+        )
+        return None
+
+    parsed = parse()
+    if inspect.isawaitable(parsed):
+        parsed = await parsed
+
+    usage = extract_usage_info(parsed, provider="openai", model=model)
+    if usage is not None:
+        logger.debug(
+            (
+                "openai patch _async_request: usage recovered via parse "
+                "type=%s parsed_type=%s model=%s"
+            ),
+            type(result).__name__,
+            type(parsed).__name__,
+            model,
+        )
+        return usage
+
+    logger.debug(
+        (
+            "openai patch _async_request: no usage found after parse "
+            "type=%s parsed_type=%s model=%s"
+        ),
+        type(result).__name__,
+        type(parsed).__name__,
+        model,
+    )
+    return None
+
+
 def _get_model_from_options(options) -> str:
     """Return model name from request options, or ``""`` for GET requests."""
     if isinstance(options.json_data, dict):
@@ -246,7 +331,11 @@ def patch_openai() -> None:
 
     def _request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        logger.debug("openai patch _request: state=%s, recorder=%s", state, get_current_budget_recorder())
+        logger.debug(
+            "openai patch _request: state=%s, recorder=%s",
+            state,
+            get_current_budget_recorder(),
+        )
         if state is None and get_current_budget_recorder() is None:
             return _orig_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
@@ -264,16 +353,25 @@ def patch_openai() -> None:
         if stream:
             return _WrappedSyncStream(result, model, state)
 
-        usage = getattr(result, "usage", None)
+        usage = _extract_result_usage(result, model=model)
         if usage is not None:
-            inp, out, cached = _get_usage_tokens(usage)
-            _record_usage(state, model, inp, out, cached)
+            _record_usage(
+                state,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_input_tokens,
+            )
         _check_limits(state)
         return result
 
     async def _async_request(self, cast_to, options, *, stream=False, stream_cls=None):
         state = get_budget_state()
-        logger.debug("openai patch _async_request: state=%s, recorder=%s", state, get_current_budget_recorder())
+        logger.debug(
+            "openai patch _async_request: state=%s, recorder=%s",
+            state,
+            get_current_budget_recorder(),
+        )
         if state is None and get_current_budget_recorder() is None:
             return await _orig_async_request(
                 self, cast_to, options, stream=stream, stream_cls=stream_cls
@@ -291,10 +389,15 @@ def patch_openai() -> None:
         if stream:
             return _WrappedAsyncStream(result, model, state)
 
-        usage = getattr(result, "usage", None)
+        usage = await _extract_async_result_usage(result, model=model)
         if usage is not None:
-            inp, out, cached = _get_usage_tokens(usage)
-            _record_usage(state, model, inp, out, cached)
+            _record_usage(
+                state,
+                usage.model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_input_tokens,
+            )
         _check_limits(state)
         return result
 
