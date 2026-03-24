@@ -11,6 +11,7 @@ import pytest
 import actguard
 import actguard.integrations.anthropic as _ant_mod
 import actguard.integrations.openai as _oai_mod
+from actguard.costs import CuTariff
 from actguard.core.budget_context import (
     _active_budget_contexts,
     _active_budget_states,
@@ -25,7 +26,6 @@ from actguard.core.budget_context import (
 from actguard.core.state import get_current_state
 from actguard.exceptions import (
     BudgetConfigurationError,
-    BudgetExceededError,
     MissingRuntimeContextError,
 )
 
@@ -106,7 +106,7 @@ def _with_runtime_budget_guard(
     *,
     user_id=None,
     name=None,
-    usd_limit: float | None,
+    cost_limit: int | None = None,
     run_id=None,
     client=None,
 ):
@@ -116,7 +116,7 @@ def _with_runtime_budget_guard(
             with runtime_client.budget_guard(
                 user_id=user_id,
                 name=name,
-                usd_limit=usd_limit,
+                cost_limit=cost_limit,
                 run_id=run_id,
             ) as guard:
                 yield guard
@@ -130,7 +130,7 @@ async def _with_runtime_budget_guard_async(
     *,
     user_id=None,
     name=None,
-    usd_limit: float | None,
+    cost_limit: int | None = None,
     run_id=None,
     client=None,
 ):
@@ -140,7 +140,7 @@ async def _with_runtime_budget_guard_async(
             async with runtime_client.budget_guard(
                 user_id=user_id,
                 name=name,
-                usd_limit=usd_limit,
+                cost_limit=cost_limit,
                 run_id=run_id,
             ) as guard:
                 yield guard
@@ -212,19 +212,43 @@ def clear_budget_registries():
 
 
 @pytest.fixture(autouse=True)
+def stub_cu_tariff(monkeypatch):
+    tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-test",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-test",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                }
+            },
+            "tools": {},
+        }
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "get_cu_tariff",
+        lambda self, force_refresh=False: tariff,
+    )
+    return tariff
+
+
+@pytest.fixture(autouse=True)
 def stub_budget_transport(monkeypatch):
-    def reserve_budget(self, *, run_id, usd_limit_micros, plan_key=None, user_id=None):
+    def reserve_budget(self, *, run_id, cost_limit, plan_key=None, user_id=None):
         return "res-test"
 
     def settle_budget(
         self,
         *,
         reserve_id,
-        provider,
-        provider_model_id,
         input_tokens,
         cached_input_tokens,
         output_tokens,
+        usage_breakdown,
     ):
         return None
 
@@ -248,7 +272,7 @@ class TestBudgetGuard:
     def test_state_set_and_cleared(self):
         assert get_current_state() is None
         assert get_budget_state() is None
-        with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0):
+        with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000):
             state = get_current_state()
             assert state is not None
             assert state.user_id == "alice"
@@ -260,20 +284,22 @@ class TestBudgetGuard:
         client = actguard.Client()
 
         with pytest.raises(MissingRuntimeContextError):
-            with client.budget_guard(user_id="alice", usd_limit=1.0):
+            with client.budget_guard(user_id="alice", cost_limit=1_000):
                 pass
 
     def test_nested_budget_guard_pushes_and_pops_stack(self):
         client = actguard.Client()
         with client.run(run_id="run-budget-nested", user_id="outer"):
-            with client.budget_guard(user_id="outer", usd_limit=1.0, plan_key="pro") as root_guard:
+            with client.budget_guard(
+                user_id="outer", cost_limit=1_000, plan_key="pro"
+            ) as root_guard:
                 root_state = get_budget_state()
                 assert root_state is not None
                 assert root_state.scope_kind == "root"
                 assert root_state.plan_key == "pro"
                 assert len(get_budget_stack()) == 1
 
-                with client.budget_guard(name="search_tool", usd_limit=0.2) as nested_guard:
+                with client.budget_guard(name="search_tool", cost_limit=200) as nested_guard:
                     nested_state = get_budget_state()
                     assert nested_state is not None
                     assert nested_state.scope_kind == "nested"
@@ -298,7 +324,7 @@ class TestBudgetGuard:
                 assert root_state is not None
                 assert root_state.scope_kind == "root"
                 assert root_state.usd_limit is None
-                assert root_guard.usd_used == 0.0
+                assert root_guard.cost_used == 0.0
 
                 with client.budget_guard(name="reranker"):
                     nested_state = get_budget_state()
@@ -309,19 +335,19 @@ class TestBudgetGuard:
 
     def test_exception_propagated_and_state_cleared(self):
         with pytest.raises(ValueError):
-            with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0):
+            with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000):
                 raise ValueError("boom")
         assert get_current_state() is None
 
     def test_budget_guard_uses_active_run_id(self):
-        with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0) as g:
+        with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000) as g:
             assert g.run_id is not None
 
     def test_run_state_set_and_cleared(self):
         from actguard.core.run_context import get_run_state
 
         assert get_run_state() is None
-        with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0) as g:
+        with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000) as g:
             state = get_run_state()
             assert state is not None
             assert state.run_id == g.run_id
@@ -346,7 +372,7 @@ class TestBudgetGuard:
 
         client = actguard.Client()
         with client.run(run_id="run-shared", user_id="outer"):
-            with client.budget_guard(usd_limit=1.0):
+            with client.budget_guard(cost_limit=1_000):
                 assert get_current_state() is not None
                 assert get_current_state().user_id == "outer"
                 assert get_run_state() is not None
@@ -370,9 +396,9 @@ class TestBudgetGuardAsync:
         seen = {}
 
         async with client.run(run_id="run-budget-nested-async", user_id="outer"):
-            async with client.budget_guard(user_id="outer", usd_limit=1.0):
+            async with client.budget_guard(user_id="outer", cost_limit=1_000):
                 async def worker(label: str) -> None:
-                    async with client.budget_guard(name=label, usd_limit=0.3):
+                    async with client.budget_guard(name=label, cost_limit=300):
                         state = get_budget_state()
                         assert state is not None
                         seen[label] = (
@@ -392,9 +418,9 @@ class TestBudgetGuardAsync:
         client = actguard.Client()
 
         async with client.run(run_id="run-budget-parallel", user_id="outer"):
-            async with client.budget_guard(user_id="outer", usd_limit=1.0) as root_guard:
+            async with client.budget_guard(user_id="outer", cost_limit=1_000) as root_guard:
                 async def worker(label: str):
-                    async with client.budget_guard(name=label, usd_limit=0.4) as nested_guard:
+                    async with client.budget_guard(name=label, cost_limit=400) as nested_guard:
                         record_usage(
                             provider="openai",
                             provider_model_id="gpt-4o-mini",
@@ -441,7 +467,7 @@ class TestNestedBudgetScopes:
         )
 
         with client.run(run_id="run-shared-root", user_id="alice"):
-            with client.budget_guard(name="root", usd_limit=0.5, plan_key="pro") as root_guard:
+            with client.budget_guard(name="root", cost_limit=100, plan_key="pro") as root_guard:
                 root_state = get_budget_state()
                 assert root_state is not None
 
@@ -467,7 +493,7 @@ class TestNestedBudgetScopes:
                 assert root_state.plan_key == "pro"
 
         assert [name for name, _ in calls] == ["reserve", "settle"]
-        assert calls[0][1]["usd_limit_micros"] == 500_000
+        assert calls[0][1]["cost_limit"] == 100
         assert calls[0][1]["plan_key"] == "pro"
         assert calls[0][1]["user_id"] == "alice"
 
@@ -479,7 +505,7 @@ class TestNestedBudgetScopes:
         monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
         with client.run(run_id="run-plan-mismatch", user_id="alice"):
-            with client.budget_guard(name="root", usd_limit=0.5, plan_key="pro"):
+            with client.budget_guard(name="root", cost_limit=100, plan_key="pro"):
                 def worker():
                     with pytest.raises(BudgetConfigurationError):
                         with client.budget_guard(name="child", plan_key="enterprise"):
@@ -496,7 +522,7 @@ class TestNestedBudgetScopes:
         monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
         with client.run(run_id="run-threaded-root", user_id="alice"):
-            with client.budget_guard(name="root", usd_limit=0.5) as root_guard:
+            with client.budget_guard(name="root", cost_limit=100) as root_guard:
                 def worker():
                     with client.budget_guard():
                         record_usage(
@@ -521,33 +547,56 @@ class TestNestedBudgetScopes:
         monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
         with client.run(run_id="run-root-mismatch", user_id="alice"):
-            with client.budget_guard(name="root", usd_limit=0.5):
+            with client.budget_guard(name="root", cost_limit=50):
                 def worker():
                     with pytest.raises(BudgetConfigurationError):
-                        with client.budget_guard(usd_limit=0.75):
+                        with client.budget_guard(cost_limit=75):
                             pass
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     pool.submit(worker).result()
 
-    def test_nested_scopes_record_tokens_without_local_cost(self, monkeypatch):
+    def test_nested_scopes_record_tokens_without_hitting_cost_limit(self, monkeypatch):
         client = actguard.Client()
         monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-enforce")
         monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
         with client.run(run_id="run-limit-walk", user_id="alice"):
-            with client.budget_guard(name="root", usd_limit=1.0):
-                with client.budget_guard(name="parent", usd_limit=0.4):
-                    with client.budget_guard(name="child", usd_limit=0.2):
+            with client.budget_guard(name="root", cost_limit=100):
+                with client.budget_guard(name="parent", cost_limit=40):
+                    with client.budget_guard(name="child", cost_limit=20):
                         record_usage(
                             provider="openai",
                             provider_model_id="gpt-4o-mini",
                             input_tokens=10,
                             output_tokens=5,
                         )
-                        # No local cost tracking — usd_used stays 0
                         violation = check_budget_limits()
                         assert violation is None
+
+    def test_check_budget_limits_blocks_on_cost_limit(self, monkeypatch):
+        client = actguard.Client()
+        monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-enforce")
+        monkeypatch.setattr(client, "settle_budget", lambda **_: None)
+
+        with client.run(run_id="run-token-limit", user_id="alice"):
+            with client.budget_guard(name="root", cost_limit=2):
+                record_usage(
+                    provider="openai",
+                    provider_model_id="gpt-4o-mini",
+                    input_tokens=10,
+                    output_tokens=5,
+                )
+                violation = check_budget_limits()
+                assert violation is not None
+                assert violation.blocked_scope.cost_limit == 2
+                assert violation.blocked_scope.tokens_used == 15
+
+    def test_budget_guard_rejects_removed_usd_limit_argument(self):
+        client = actguard.Client()
+
+        with pytest.raises(TypeError):
+            client.budget_guard(usd_limit=0.05)
 
 # ---------------------------------------------------------------------------
 # OpenAI helper unit tests
@@ -588,7 +637,7 @@ class TestOpenAIHelpers:
         from actguard.core.state import BudgetState
         from actguard.integrations.openai import _WrappedAsyncStream
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         stream = _WrappedAsyncStream(_AsyncIter([_chunk(100, 50)]), "gpt-4o", state)
 
         first = await anext(stream)
@@ -607,11 +656,11 @@ class TestOpenAIIntegration:
         sync_mock.return_value = _resp(100, 50)
 
         client = openai.OpenAI(api_key="sk-test")
-        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=1_000) as guard:
             client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     def test_sync_non_streaming_records_usage_from_parsed_wrapper(self, openai_mocks):
         import openai
@@ -621,12 +670,12 @@ class TestOpenAIIntegration:
         sync_mock.return_value = wrapped
 
         client = openai.OpenAI(api_key="sk-test")
-        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=1_000) as guard:
             client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert wrapped.parse_calls == 1
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, openai_mocks):
@@ -635,11 +684,11 @@ class TestOpenAIIntegration:
         async_mock.return_value = _resp(100, 50)
 
         client = openai.AsyncOpenAI(api_key="sk-test")
-        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+        async with _with_runtime_budget_guard_async(user_id="u1", cost_limit=1_000) as guard:
             await client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage_from_parsed_wrapper(
@@ -652,12 +701,12 @@ class TestOpenAIIntegration:
         async_mock.return_value = wrapped
 
         client = openai.AsyncOpenAI(api_key="sk-test")
-        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+        async with _with_runtime_budget_guard_async(user_id="u1", cost_limit=1_000) as guard:
             await client.chat.completions.create(model="gpt-4o", messages=[])
 
         assert wrapped.parse_calls == 1
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     def test_sync_streaming_records_usage(self, openai_mocks):
         import openai
@@ -665,7 +714,7 @@ class TestOpenAIIntegration:
         sync_mock.return_value = iter([_chunk(content="a"), _chunk(100, 50)])
 
         client = openai.OpenAI(api_key="sk-test")
-        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=1_000) as guard:
             stream = client.chat.completions.create(
                 model="gpt-4o", messages=[], stream=True
             )
@@ -673,7 +722,7 @@ class TestOpenAIIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_usage(self, openai_mocks):
@@ -682,7 +731,7 @@ class TestOpenAIIntegration:
         async_mock.return_value = _AsyncIter([_chunk(content="a"), _chunk(100, 50)])
 
         client = openai.AsyncOpenAI(api_key="sk-test")
-        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+        async with _with_runtime_budget_guard_async(user_id="u1", cost_limit=1_000) as guard:
             stream = await client.chat.completions.create(
                 model="gpt-4o", messages=[], stream=True
             )
@@ -690,7 +739,7 @@ class TestOpenAIIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
 class TestAnthropicIntegration:
     @staticmethod
@@ -725,7 +774,7 @@ class TestAnthropicIntegration:
         sync_mock.return_value = self._resp(100, 50)
 
         client = anthropic.Anthropic(api_key="test")
-        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=1_000) as guard:
             client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -733,7 +782,7 @@ class TestAnthropicIntegration:
             )
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, anthropic_mocks):
@@ -743,7 +792,7 @@ class TestAnthropicIntegration:
         async_mock.return_value = self._resp(100, 50)
 
         client = anthropic.AsyncAnthropic(api_key="test")
-        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+        async with _with_runtime_budget_guard_async(user_id="u1", cost_limit=1_000) as guard:
             await client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -751,7 +800,7 @@ class TestAnthropicIntegration:
             )
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     def test_sync_streaming_records_usage(self, anthropic_mocks):
         import anthropic
@@ -760,7 +809,7 @@ class TestAnthropicIntegration:
         sync_mock.return_value = iter([self._event_start(100), self._event_delta(50)])
 
         client = anthropic.Anthropic(api_key="test")
-        with _with_runtime_budget_guard(user_id="u1", usd_limit=1.0) as guard:
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=1_000) as guard:
             stream = client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -771,7 +820,7 @@ class TestAnthropicIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_usage(self, anthropic_mocks):
@@ -783,7 +832,7 @@ class TestAnthropicIntegration:
         )
 
         client = anthropic.AsyncAnthropic(api_key="test")
-        async with _with_runtime_budget_guard_async(user_id="u1", usd_limit=1.0) as guard:
+        async with _with_runtime_budget_guard_async(user_id="u1", cost_limit=1_000) as guard:
             stream = await client.messages.create(
                 model="claude-3-haiku-20240307",
                 max_tokens=100,
@@ -794,7 +843,7 @@ class TestAnthropicIntegration:
                 pass
 
         assert guard.tokens_used == 150
-        assert guard.usd_used == 0.0
+        assert guard.cost_used == 2
 
     def test_non_messages_endpoint_is_ignored(self, anthropic_mocks):
         from anthropic._base_client import SyncAPIClient
@@ -814,7 +863,7 @@ class TestAnthropicIntegration:
             _strict_response_validation=False,
         )
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             opts = FinalRequestOptions.construct(
                 method="post",
@@ -824,7 +873,7 @@ class TestAnthropicIntegration:
             client.request(cast_to=object, options=opts)
 
         assert state.tokens_used == 0
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_patch_anthropic_is_idempotent(self, anthropic_mocks):
         from anthropic._base_client import SyncAPIClient
@@ -906,12 +955,12 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 150
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_non_streaming_records_usage(self, google_genai_stubs):
@@ -928,12 +977,12 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             await client.async_request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 150
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_sync_streaming_records_latest_usage_once(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -958,7 +1007,7 @@ class TestGoogleGenAIPatch:
             ),
         ]
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             for _ in client.request_streamed(
                 "post",
@@ -968,7 +1017,7 @@ class TestGoogleGenAIPatch:
                 pass
 
         assert state.tokens_used == 150
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     @pytest.mark.asyncio
     async def test_async_streaming_records_latest_usage_once(self, google_genai_stubs):
@@ -994,7 +1043,7 @@ class TestGoogleGenAIPatch:
             ),
         ]
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             stream = await client.async_request_streamed(
                 "post",
@@ -1005,7 +1054,7 @@ class TestGoogleGenAIPatch:
                 pass
 
         assert state.tokens_used == 150
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_non_generate_endpoint_not_recorded(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -1021,12 +1070,12 @@ class TestGoogleGenAIPatch:
             headers={},
         )
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:countTokens", {})
 
         assert state.tokens_used == 0
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_missing_usage_does_not_record(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -1037,12 +1086,12 @@ class TestGoogleGenAIPatch:
         client = BaseApiClient()
         client.sync_result = SimpleNamespace(body=json.dumps({"no_usage": True}), headers={})
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         with _with_runtime_budget_state(state):
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 0
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_invalid_json_body_does_not_record(self, google_genai_stubs):
         from actguard.core.state import BudgetState
@@ -1058,7 +1107,7 @@ class TestGoogleGenAIPatch:
             client.request("post", "/v1beta/models/gemini-2.0-flash:generateContent", {})
 
         assert state.tokens_used == 0
-        assert state.usd_used == 0.0
+        assert state.cost_used == 0.0
 
     def test_patch_google_is_idempotent(self, google_genai_stubs):
         BaseApiClient, google_mod = google_genai_stubs
@@ -1098,7 +1147,7 @@ class TestThreadFallback:
         def worker():
             return get_current_state()
 
-        with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0):
+        with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 fut = pool.submit(worker)
                 results.append(fut.result())
@@ -1133,7 +1182,7 @@ class TestThreadFallback:
 
         from actguard.core.state import BudgetState
 
-        state = BudgetState(user_id="u1", usd_limit=None)
+        state = BudgetState(user_id="u1", cost_limit=None, usd_limit=None)
         n_threads = 10
         calls_per_thread = 100
 
@@ -1160,7 +1209,7 @@ class TestThreadFallback:
         """After budget_guard exits, worker threads should not see the state."""
         import concurrent.futures
 
-        with _with_runtime_budget_guard(user_id="alice", usd_limit=1.0):
+        with _with_runtime_budget_guard(user_id="alice", cost_limit=1_000):
             pass  # exit
 
         with _active_budget_states_lock:

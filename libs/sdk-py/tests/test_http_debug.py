@@ -86,14 +86,14 @@ def test_debug_mode_logs_budget_request_and_response(monkeypatch, capsys):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+    reserve_response = client.reserve_budget(run_id="run-1", cost_limit=500)
 
     captured = capsys.readouterr()
     stderr = captured.err
-    assert reserve_id == "res-123"
+    assert reserve_response == {"status": "reserved", "reserve_id": "res-123"}
     assert "request attempt=1/1 POST https://gw.example/api/v1/reserve" in stderr
     assert '"run_id":"run-1"' in stderr
-    assert '"usd_limit_micros":500000' in stderr
+    assert '"cost_limit":500' in stderr
     assert (
         "response attempt=1/1 POST https://gw.example/api/v1/reserve status=200"
         in stderr

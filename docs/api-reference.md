@@ -83,7 +83,7 @@ client.budget_guard(
     *,
     user_id: str | None = None,
     name: str | None = None,
-    usd_limit: float | None = None,
+    token_limit: int | None = None,
     run_id: str | None = None,
     plan_key: str | None = None,
 )
@@ -109,7 +109,7 @@ class actguard.BudgetGuard(
     client: Client,
     user_id: str | None = None,
     name: str | None = None,
-    usd_limit: float | None = None,
+    token_limit: int | None = None,
     run_id: str | None = None,
     plan_key: str | None = None,
 )
@@ -123,7 +123,7 @@ Although `BudgetGuard` is exported, the supported public entrypoint is `client.b
 |---|---|---|
 | `user_id` | `str \| None` | Budget owner for this scope |
 | `name` | `str \| None` | Optional scope label |
-| `usd_limit` | `float \| None` | USD budget for this scope |
+| `token_limit` | `int \| None` | Runtime token budget for this scope |
 | `run_id` | `str \| None` | Active run id once entered |
 | `plan_key` | `str \| None` | Optional plan identifier |
 | `tokens_used` | `int` | Root totals for root scopes, local totals for nested scopes |
@@ -294,9 +294,10 @@ class actguard.exceptions.BudgetClientMismatchError(ActGuardRuntimeContextError)
 |---|---|
 | `user_id` | `str \| None` |
 | `tokens_used` | `int` |
+| `token_limit` | `int \| None` |
 | `usd_used` | `float` |
 | `usd_limit` | `float \| None` |
-| `limit_type` | `Literal["usd"]` |
+| `limit_type` | `Literal["token", "usd"]` |
 | `scope_id` | `str \| None` |
 | `scope_name` | `str \| None` |
 | `scope_kind` | `str \| None` |

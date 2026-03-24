@@ -554,18 +554,24 @@ class BudgetExceededError(ToolGuardError):
         *,
         user_id: Optional[str],
         tokens_used: int,
-        usd_used: float,
-        usd_limit: Optional[float],
-        limit_type: Literal["usd"],
+        cost_used: int,
+        cost_limit: Optional[int],
+        usd_limit: Optional[float] = None,
+        limit_type: Literal["cost"],
         scope_id: Optional[str] = None,
         scope_name: Optional[str] = None,
         scope_kind: Optional[str] = None,
         parent_scope_id: Optional[str] = None,
         root_scope_id: Optional[str] = None,
+        origin: Literal["local", "remote"] = "local",
+        path: Optional[str] = None,
+        status_code: int | None = None,
+        cause: BaseException | None = None,
     ) -> None:
         self.user_id = user_id
         self.tokens_used = tokens_used
-        self.usd_used = usd_used
+        self.cost_used = cost_used
+        self.cost_limit = cost_limit
         self.usd_limit = usd_limit
         self.limit_type = limit_type
         self.scope_id = scope_id
@@ -573,19 +579,32 @@ class BudgetExceededError(ToolGuardError):
         self.scope_kind = scope_kind
         self.parent_scope_id = parent_scope_id
         self.root_scope_id = root_scope_id
+        self.origin = origin
+        self.path = path
+        self.status_code = status_code
         user_label = user_id if user_id is not None else "<unknown>"
-        limit_label = f"${usd_limit:.6f}" if usd_limit is not None else "<unknown>"
+        limit_label = str(cost_limit) if cost_limit is not None else "<unknown>"
+        if origin == "remote":
+            message = (
+                f"Budget exceeded for user '{user_label}'"
+                + (f" at {path}" if path else "")
+                + (f" (status {status_code})" if status_code is not None else "")
+                + "."
+            )
+        else:
+            message = (
+                f"Cost limit exceeded for user '{user_label}': "
+                f"{cost_used} / {limit_label} CU used"
+            )
         super().__init__(
-            (
-                f"USD limit exceeded for user '{user_label}': "
-                f"${usd_used:.6f} / {limit_label} used"
-            ),
+            message,
             code=self.code,
             reason=self.reason,
             details={
                 "user_id": user_id,
                 "tokens_used": tokens_used,
-                "usd_used": usd_used,
+                "cost_used": cost_used,
+                "cost_limit": cost_limit,
                 "usd_limit": usd_limit,
                 "limit_type": limit_type,
                 "scope_id": scope_id,
@@ -593,8 +612,13 @@ class BudgetExceededError(ToolGuardError):
                 "scope_kind": scope_kind,
                 "parent_scope_id": parent_scope_id,
                 "root_scope_id": root_scope_id,
+                "origin": origin,
+                "path": path,
+                "status_code": status_code,
             },
+            cause=cause,
             retryable=False,
+            status_code=status_code,
             event_category=self.event_category,
             event_name=self.event_name,
             severity=self.severity,
@@ -605,7 +629,8 @@ class BudgetExceededError(ToolGuardError):
         return {
             "user_id": self.user_id,
             "tokens_used": self.tokens_used,
-            "usd_used": self.usd_used,
+            "cost_used": self.cost_used,
+            "cost_limit": self.cost_limit,
             "usd_limit": self.usd_limit,
             "limit_type": self.limit_type,
             "scope_id": self.scope_id,
@@ -613,6 +638,9 @@ class BudgetExceededError(ToolGuardError):
             "scope_kind": self.scope_kind,
             "parent_scope_id": self.parent_scope_id,
             "root_scope_id": self.root_scope_id,
+            "origin": self.origin,
+            "path": self.path,
+            "status_code": self.status_code,
         }
 
 

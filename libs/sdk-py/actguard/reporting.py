@@ -14,6 +14,30 @@ from actguard.observability.events import emit_event, emit_usage_event
 from actguard.observability.violations import emit_violation
 
 
+def _budget_accounting_active() -> bool:
+    return get_current_budget_recorder() is not None or get_budget_state() is not None
+
+
+def emit_provider_usage_event(
+    *,
+    provider: str,
+    model: str,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+) -> None:
+    if _budget_accounting_active():
+        return
+
+    emit_usage_event(
+        provider=provider,
+        model=model,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
 def record_response_usage(
     response: Any,
     *,
@@ -42,7 +66,7 @@ def record_response_usage(
             output_tokens=usage.output_tokens,
         )
 
-    emit_usage_event(
+    emit_provider_usage_event(
         provider=usage.provider,
         model=usage.model,
         input_tokens=usage.input_tokens,
@@ -70,9 +94,9 @@ def _check_limits() -> None:
     raise BudgetExceededError(
         user_id=blocked_scope.user_id,
         tokens_used=blocked_scope.tokens_used,
-        usd_used=blocked_scope.usd_used,
-        usd_limit=blocked_scope.usd_limit,
-        limit_type="usd",
+        cost_used=blocked_scope.cost_used,
+        cost_limit=blocked_scope.cost_limit,
+        limit_type="cost",
         scope_id=blocked_scope.scope_id,
         scope_name=blocked_scope.scope_name,
         scope_kind=blocked_scope.scope_kind,
@@ -81,4 +105,10 @@ def _check_limits() -> None:
     )
 
 
-__all__ = ["emit_event", "emit_usage_event", "emit_violation", "record_response_usage"]
+__all__ = [
+    "emit_event",
+    "emit_provider_usage_event",
+    "emit_usage_event",
+    "emit_violation",
+    "record_response_usage",
+]

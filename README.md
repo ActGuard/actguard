@@ -23,7 +23,7 @@ Traditional checks handle one call at a time. Agent failures often happen across
 
 ## Primary use cases
 
-### 1) Bound spend with `Client.run(...)` + `client.budget_guard(...)`
+### 1) Bound model usage with `Client.run(...)` + `client.budget_guard(...)`
 
 ```python
 import openai
@@ -42,7 +42,7 @@ oai = openai.OpenAI()
 
 try:
     with ag.run(user_id="alice"):
-        with ag.budget_guard(usd_limit=0.05) as guard:
+        with ag.budget_guard(token_limit=50_000) as guard:
             oai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Summarize this ticket thread."}],
@@ -55,7 +55,7 @@ except BudgetTransportError:
     pass
 ```
 
-This protects you from silent cost drift when an agent keeps exploring, retrying, or over-calling models. Budget scopes reserve on entry and settle on exit, so they require a configured `Client` with gateway credentials.
+This protects you from runaway model usage when an agent keeps exploring, retrying, or over-calling models. Budget scopes reserve on entry and settle on exit, so they require a configured `Client` with gateway credentials.
 
 The hosted ActGuard gateway uses `https://api.actguard.ai`:
 

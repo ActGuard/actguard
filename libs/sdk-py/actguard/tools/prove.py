@@ -15,7 +15,11 @@ def prove(
     max_items: int = 200,
     on_too_many: str = "block",
 ):
-    """Decorator that mints verified facts from a tool's return value.
+    """Mint verified facts from a tool result into the current session.
+
+    Use this on retrieval or lookup tools when later tools should only operate
+    on values that were actually returned earlier in the same
+    ``actguard.session(...)``.
 
     Args:
         kind: The fact kind/category (e.g. "order_id", "user_id").

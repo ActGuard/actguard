@@ -8,6 +8,7 @@ import pytest
 
 import actguard
 import actguard.integrations.openai as _oai_mod
+from actguard.costs import CuTariff
 from actguard.core.budget_context import get_budget_state
 from actguard.events.envelope import ActGuardContextEvidenceProvider
 from actguard.exceptions import BudgetExceededError
@@ -45,6 +46,31 @@ def emitted_events(client, monkeypatch):
     return captured
 
 
+@pytest.fixture(autouse=True)
+def stub_cu_tariff(monkeypatch):
+    tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-test",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-test",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                }
+            },
+            "tools": {},
+        }
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "get_cu_tariff",
+        lambda self, force_refresh=False: tariff,
+    )
+    return tariff
+
+
 @pytest.fixture()
 def stub_budget_transport(client, monkeypatch):
     monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-event")
@@ -74,13 +100,14 @@ def test_budget_exceeded_emits_violation_event(
     error = BudgetExceededError(
         user_id="alice",
         tokens_used=1000,
-        usd_used=0.05,
+        cost_used=50,
+        cost_limit=1000,
         usd_limit=None,
-        limit_type="usd",
+        limit_type="cost",
     )
 
     with client.run(user_id="alice"):
-        with client.budget_guard(user_id="alice", usd_limit=0.05):
+        with client.budget_guard(user_id="alice", cost_limit=1000):
             actguard.emit_violation(error)
 
     matches = [
@@ -96,14 +123,14 @@ def test_budget_exceeded_emits_violation_event(
     assert envelope.outcome == "blocked"
     assert envelope.payload["user_id"] == "alice"
     assert envelope.payload["tokens_used"] == 1000
-    assert envelope.payload["limit_type"] == "usd"
+    assert envelope.payload["limit_type"] == "cost"
 
 
 def test_budget_guard_events_include_run_id(
     client, emitted_events, stub_budget_transport
 ):
     with client.run(user_id="alice", run_id="run-ctx"):
-        with client.budget_guard(user_id="alice", usd_limit=0.05) as guard:
+        with client.budget_guard(user_id="alice", cost_limit=1000) as guard:
             actguard.emit_event("tool", "invoke", {})
 
     matches = [
@@ -121,7 +148,7 @@ def test_budget_lifecycle_events_are_not_emitted_by_sdk(
     client, emitted_events, stub_budget_transport
 ):
     with client.run(run_id="budget-lifecycle"):
-        with client.budget_guard(run_id="budget-lifecycle", usd_limit=0.05):
+        with client.budget_guard(run_id="budget-lifecycle", cost_limit=1000):
             pass
 
     lifecycle = [
@@ -136,8 +163,8 @@ def test_nested_budget_events_include_top_level_scope_metadata(
     client, emitted_events, stub_budget_transport
 ):
     with client.run(run_id="run-shared"):
-        with client.budget_guard(user_id="outer", usd_limit=0.2, plan_key="pro"):
-            with client.budget_guard(name="search_tool", usd_limit=0.1):
+        with client.budget_guard(user_id="outer", cost_limit=200, plan_key="pro"):
+            with client.budget_guard(name="search_tool", cost_limit=100):
                 actguard.emit_event("tool", "invoke", {"tool_name": "search"})
 
     matches = [
@@ -166,9 +193,10 @@ def test_emit_violation_no_op_without_config():
     error = BudgetExceededError(
         user_id="alice",
         tokens_used=100,
-        usd_used=0.01,
+        cost_used=10,
+        cost_limit=100,
         usd_limit=None,
-        limit_type="usd",
+        limit_type="cost",
     )
     actguard.emit_violation(error)
 
@@ -366,7 +394,7 @@ def test_no_event_emission_without_active_runtime_context(client, emitted_events
     assert matches == []
 
 
-def test_record_response_usage_records_openai_langchain_message(
+def test_record_response_usage_does_not_emit_llm_usage_inside_budget_guard(
     client, emitted_events, stub_budget_transport
 ):
     raw = SimpleNamespace(
@@ -382,7 +410,7 @@ def test_record_response_usage_records_openai_langchain_message(
     )
 
     with client.run(run_id="run-openai-wrapper", user_id="alice"):
-        with client.budget_guard(name="search_tool", usd_limit=1.0):
+        with client.budget_guard(name="search_tool", cost_limit=1_000):
             assert record_response_usage({"raw": raw}, provider="openai")
             state = get_budget_state()
             assert state is not None
@@ -390,6 +418,32 @@ def test_record_response_usage_records_openai_langchain_message(
             assert state.input_tokens == 31
             assert state.cached_input_tokens == 7
             assert state.output_tokens == 5
+
+    matches = [
+        env
+        for env in emitted_events
+        if env.category == "llm" and env.name == "usage"
+    ]
+    assert matches == []
+
+
+def test_record_response_usage_outside_budget_guard_still_emits_llm_usage(
+    client, emitted_events
+):
+    raw = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 31,
+            "output_tokens": 5,
+            "input_token_details": {"cache_read": 7},
+        },
+        response_metadata={
+            "model_name": "gpt-4o",
+            "token_usage": {"prompt_tokens": 31, "completion_tokens": 5},
+        },
+    )
+
+    with client.run(run_id="run-openai-wrapper", user_id="alice"):
+        assert record_response_usage({"raw": raw}, provider="openai")
 
     matches = [
         env
@@ -405,7 +459,7 @@ def test_record_response_usage_records_openai_langchain_message(
     assert envelope.output_tokens == 5
 
 
-def test_record_response_usage_infers_anthropic_provider_from_model(
+def test_record_response_usage_infers_anthropic_provider_without_emitting_llm_usage(
     client, emitted_events, stub_budget_transport
 ):
     raw = SimpleNamespace(
@@ -417,7 +471,7 @@ def test_record_response_usage_infers_anthropic_provider_from_model(
     )
 
     with client.run(run_id="run-anthropic-wrapper", user_id="alice"):
-        with client.budget_guard(name="search_tool", usd_limit=1.0):
+        with client.budget_guard(name="search_tool", cost_limit=1_000):
             assert record_response_usage(raw)
 
     matches = [
@@ -425,15 +479,10 @@ def test_record_response_usage_infers_anthropic_provider_from_model(
         for env in emitted_events
         if env.category == "llm" and env.name == "usage"
     ]
-    assert len(matches) == 1
-    envelope = matches[0]
-    assert envelope.provider == "anthropic"
-    assert envelope.model == "claude-3-5-sonnet-latest"
-    assert envelope.input_tokens == 11
-    assert envelope.output_tokens == 7
+    assert matches == []
 
 
-def test_record_response_usage_infers_google_provider_from_response_metadata(
+def test_record_response_usage_infers_google_provider_without_emitting_llm_usage(
     client, emitted_events, stub_budget_transport
 ):
     raw = SimpleNamespace(
@@ -449,7 +498,7 @@ def test_record_response_usage_infers_google_provider_from_response_metadata(
     )
 
     with client.run(run_id="run-google-wrapper", user_id="alice"):
-        with client.budget_guard(name="search_tool", usd_limit=1.0):
+        with client.budget_guard(name="search_tool", cost_limit=1_000):
             assert record_response_usage(raw)
 
     matches = [
@@ -457,12 +506,7 @@ def test_record_response_usage_infers_google_provider_from_response_metadata(
         for env in emitted_events
         if env.category == "llm" and env.name == "usage"
     ]
-    assert len(matches) == 1
-    envelope = matches[0]
-    assert envelope.provider == "google"
-    assert envelope.model == "gemini-3.1-pro-preview"
-    assert envelope.input_tokens == 10
-    assert envelope.output_tokens == 24
+    assert matches == []
 
 
 def test_record_response_usage_returns_false_when_usage_missing(
@@ -471,7 +515,7 @@ def test_record_response_usage_returns_false_when_usage_missing(
     raw = SimpleNamespace(response_metadata={"model_name": "gpt-4o"})
 
     with client.run(run_id="run-no-usage", user_id="alice"):
-        with client.budget_guard(name="search_tool", usd_limit=1.0):
+        with client.budget_guard(name="search_tool", cost_limit=1_000):
             assert not record_response_usage(raw, provider="openai")
 
     matches = [
@@ -518,7 +562,7 @@ def test_no_event_leakage_between_multiple_clients(monkeypatch):
     client_b.close()
 
 
-def test_openai_provider_call_emits_one_llm_usage_event(
+def test_openai_provider_call_does_not_emit_llm_usage_event_in_budget_guard(
     client,
     emitted_events,
     stub_budget_transport,
@@ -536,7 +580,7 @@ def test_openai_provider_call_emits_one_llm_usage_event(
         return model_client.chat.completions.create(model="gpt-4o", messages=[])
 
     with client.run(run_id="run-llm-usage", user_id="alice"):
-        with client.budget_guard(name="search_tool", usd_limit=1.0):
+        with client.budget_guard(name="search_tool", cost_limit=1_000):
             call_model()
 
     matches = [
@@ -544,19 +588,7 @@ def test_openai_provider_call_emits_one_llm_usage_event(
         for env in emitted_events
         if env.category == "llm" and env.name == "usage"
     ]
-    assert len(matches) == 1
-    envelope = matches[0]
-    wire = envelope.to_dict()
-    assert envelope.provider == "openai"
-    assert envelope.model == "gpt-4o"
-    assert envelope.scope_name == "search_tool"
-    assert envelope.tool_name
-    assert envelope.input_tokens == 100
-    assert envelope.output_tokens == 50
-    assert envelope.usd_micros is None
-    assert wire["provider"] == "openai"
-    assert wire["scope_name"] == "search_tool"
-    assert wire["tool_name"] == envelope.tool_name
+    assert matches == []
 
 
 def test_only_llm_usage_event_is_eligible_for_attributed_spend(client, emitted_events):
@@ -597,9 +629,10 @@ def test_run_blocked_emits_end_blocked(client, emitted_events):
     violation = BudgetExceededError(
         user_id="alice",
         tokens_used=1000,
-        usd_used=0.05,
+        cost_used=50,
+        cost_limit=1000,
         usd_limit=None,
-        limit_type="usd",
+        limit_type="cost",
     )
 
     with pytest.raises(BudgetExceededError):

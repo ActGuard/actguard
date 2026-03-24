@@ -19,6 +19,7 @@ from actguard.core.budget_recorder import (
     set_current_budget_recorder,
 )
 from actguard.exceptions import (
+    ActGuardPaymentRequired,
     ActGuardRuntimeContextError,
     ActGuardUsageError,
     BudgetClientMismatchError,
@@ -61,22 +62,15 @@ class _EagerBudgetRecorder:
             raise BudgetExceededError(
                 user_id=blocked_scope.user_id,
                 tokens_used=blocked_scope.tokens_used,
-                usd_used=blocked_scope.usd_used,
-                usd_limit=blocked_scope.usd_limit,
-                limit_type="usd",
+                cost_used=blocked_scope.cost_used,
+                cost_limit=blocked_scope.cost_limit,
+                limit_type="cost",
                 scope_id=blocked_scope.scope_id,
                 scope_name=blocked_scope.scope_name,
                 scope_kind=blocked_scope.scope_kind,
                 parent_scope_id=blocked_scope.parent_scope_id,
                 root_scope_id=blocked_scope.root_scope_id,
             )
-
-
-def _to_micros(usd_limit: Optional[float]) -> Optional[int]:
-    if usd_limit is None:
-        return None
-    return int(round(usd_limit * 1_000_000))
-
 
 class BudgetGuard:
     """Client-bound budget scope layered on top of run scope."""
@@ -87,14 +81,14 @@ class BudgetGuard:
         client: "Client",
         user_id: Optional[str] = None,
         name: Optional[str] = None,
-        usd_limit: Optional[float] = None,
+        cost_limit: Optional[int] = None,
         run_id: Optional[str] = None,
         plan_key: Optional[str] = None,
     ) -> None:
         self._client = client
         self.user_id = user_id
         self.name = name
-        self.usd_limit = usd_limit
+        self.cost_limit = cost_limit
         self._requested_run_id = run_id
         self.plan_key = plan_key or None
 
@@ -125,6 +119,10 @@ class BudgetGuard:
             path=f"/api/v1/{operation}",
             stacklevel=3,
         )
+
+    @staticmethod
+    def _should_reraise_budget_enforcement(exc: BaseException) -> bool:
+        return isinstance(exc, (BudgetExceededError, ActGuardPaymentRequired))
 
     def _bind_run_state(self) -> Optional[str]:
         from actguard.core.run_context import require_run_state
@@ -166,11 +164,11 @@ class BudgetGuard:
                 "budget_guard name does not match the existing root scope."
             )
         if (
-            self.usd_limit is not None
-            and shared_root.root_budget_limit != self.usd_limit
+            self.cost_limit is not None
+            and shared_root.root_cost_limit != self.cost_limit
         ):
             raise BudgetConfigurationError(
-                "budget_guard usd_limit does not match the existing root scope."
+                "budget_guard cost_limit does not match the existing root scope."
             )
         if self.plan_key is not None and shared_root.plan_key != self.plan_key:
             raise BudgetConfigurationError(
@@ -182,8 +180,7 @@ class BudgetGuard:
         shared_root, created = self._run_state.acquire_budget_root(
             user_id=user_id,
             scope_name=self.name,
-            usd_limit=self.usd_limit,
-            usd_limit_micros=_to_micros(self.usd_limit),
+            cost_limit=self.cost_limit,
             plan_key=self.plan_key,
         )
         if not created:
@@ -214,10 +211,11 @@ class BudgetGuard:
             scope_kind="nested",
             parent_scope_id=parent_scope.scope_id,
             root_scope_id=shared_root.root_scope_id,
-            usd_limit=self.usd_limit,
-            usd_limit_micros=_to_micros(self.usd_limit),
+            cost_limit=self.cost_limit,
             plan_key=shared_root.plan_key,
             reserve_id=shared_root.reserve_id,
+            tariff=shared_root.tariff,
+            tariff_version=shared_root.tariff_version,
             shared_root=shared_root,
         )
 
@@ -226,10 +224,43 @@ class BudgetGuard:
             return
         self._run_state.release_budget_root(self._shared_root)
 
+    def _cost_enforcement_requested(self) -> bool:
+        return bool(
+            (self._state is not None and self._state.cost_limit is not None)
+            or (
+                self._shared_root is not None
+                and self._shared_root.root_cost_limit is not None
+            )
+        )
+
+    def _install_tariff(self, tariff) -> None:
+        if self._shared_root is None or self._state is None:
+            return
+        self._shared_root.install_tariff(tariff)
+        self._state.tariff = tariff
+        self._state.tariff_version = tariff.tariff_version
+
+    def _ensure_tariff(self) -> None:
+        if self._shared_root is None or self._state is None:
+            return
+        if self._shared_root.tariff is not None:
+            self._state.tariff = self._shared_root.tariff
+            self._state.tariff_version = self._shared_root.tariff_version
+            return
+        tariff = self._client.get_cu_tariff()
+        self._install_tariff(tariff)
+
     def __enter__(self) -> "BudgetGuard":
-        if self.usd_limit is not None and self.usd_limit <= 0:
+        if self.cost_limit is not None and (
+            not isinstance(self.cost_limit, int)
+            or isinstance(self.cost_limit, bool)
+            or self.cost_limit <= 0
+        ):
             raise ActGuardUsageError(
-                "budget_guard requires usd_limit > 0 when provided.",
+                (
+                    "budget_guard requires cost_limit to be a positive integer "
+                    "when provided."
+                ),
                 code="usage.budget_guard_configuration",
                 reason="budget_guard_configuration",
                 retryable=False,
@@ -249,24 +280,64 @@ class BudgetGuard:
         self._state = scope
 
         try:
+            if self._cost_enforcement_requested():
+                try:
+                    self._ensure_tariff()
+                except Exception as exc:
+                    self._warn_budget_transport_issue(
+                        operation="cu-tariff",
+                        exc=exc,
+                    )
             if self._is_root_scope and self._created_root:
                 assert self._shared_root is not None
                 if self._budget_reporting_enabled():
                     try:
-                        reserve_id = self._client.reserve_budget(
+                        reserve_response = self._client.reserve_budget(
                             run_id=self._run_id,
-                            usd_limit_micros=self._shared_root.root_budget_limit_micros,
+                            cost_limit=self._shared_root.root_cost_limit,
                             plan_key=self._shared_root.plan_key,
                             user_id=self._shared_root.user_id,
                         )
                     except Exception as exc:
+                        if self._should_reraise_budget_enforcement(exc):
+                            raise
                         self._warn_budget_transport_issue(
                             operation="reserve",
                             exc=exc,
                         )
                     else:
+                        if isinstance(reserve_response, str):
+                            reserve_id = reserve_response
+                            reserve_metadata = {}
+                        else:
+                            reserve_id = reserve_response["reserve_id"]
+                            reserve_metadata = reserve_response
                         self._shared_root.reserve_id = reserve_id
                         self._state.reserve_id = reserve_id
+                        response_cost_limit = reserve_metadata.get("cost_limit")
+                        if (
+                            isinstance(response_cost_limit, int)
+                            and response_cost_limit > 0
+                            and self._shared_root.root_cost_limit is None
+                        ):
+                            self._shared_root.root_cost_limit = response_cost_limit
+                            self._state.cost_limit = response_cost_limit
+                        response_tariff_version = reserve_metadata.get(
+                            "tariff_version"
+                        )
+                        if (
+                            isinstance(response_tariff_version, str)
+                            and response_tariff_version
+                        ):
+                            self._shared_root.tariff_version = response_tariff_version
+                            self._state.tariff_version = response_tariff_version
+                        estimated_usd_micros = reserve_metadata.get(
+                            "estimated_usd_micros"
+                        )
+                        if isinstance(estimated_usd_micros, int):
+                            self._shared_root.estimated_usd_micros = (
+                                estimated_usd_micros
+                            )
 
             self._budget_token = push_budget_scope(
                 scope,
@@ -314,23 +385,42 @@ class BudgetGuard:
                             )
                             shared_root.output_tokens = self._state.output_tokens
                             shared_root.tokens_used = self._state.tokens_used
-                            shared_root.usd_used = self._state.usd_used
-                        has_usage = (
-                            shared_root.input_tokens + shared_root.output_tokens
-                        ) > 0
+                            shared_root.cost_used = self._state.cost_used
+                        usage_breakdown = shared_root.usage_breakdown_payload()
+                        if not usage_breakdown and self._state is not None:
+                            has_fallback_usage = (
+                                self._state.input_tokens
+                                + self._state.cached_input_tokens
+                                + self._state.output_tokens
+                            ) > 0
+                            if has_fallback_usage:
+                                usage_breakdown = [
+                                    {
+                                        "provider": self._state.provider,
+                                        "provider_model_id": (
+                                            self._state.provider_model_id
+                                        ),
+                                        "input_tokens": self._state.input_tokens,
+                                        "cached_input_tokens": (
+                                            self._state.cached_input_tokens
+                                        ),
+                                        "output_tokens": self._state.output_tokens,
+                                    }
+                                ]
+                                if self._state.scope_name:
+                                    usage_breakdown[0]["scope_name"] = (
+                                        self._state.scope_name
+                                    )
                         self._client.settle_budget(
                             reserve_id=shared_root.reserve_id,
-                            provider=shared_root.provider
-                            or ("none" if not has_usage else ""),
-                            provider_model_id=(
-                                shared_root.provider_model_id
-                                or ("none" if not has_usage else "")
-                            ),
                             input_tokens=shared_root.input_tokens,
                             cached_input_tokens=shared_root.cached_input_tokens,
                             output_tokens=shared_root.output_tokens,
+                            usage_breakdown=usage_breakdown,
                         )
                 except Exception as exc:
+                    if self._should_reraise_budget_enforcement(exc):
+                        raise
                     self._warn_budget_transport_issue(
                         operation="settle",
                         exc=exc,
@@ -354,10 +444,10 @@ class BudgetGuard:
         return self._state.tokens_used
 
     @property
-    def local_usd_used(self) -> float:
+    def local_cost_used(self) -> int:
         if self._state is None:
-            return 0.0
-        return self._state.usd_used
+            return 0
+        return self._state.cost_used
 
     @property
     def root_tokens_used(self) -> int:
@@ -368,11 +458,11 @@ class BudgetGuard:
         return self._state.root_totals()[0]
 
     @property
-    def root_usd_used(self) -> float:
+    def root_cost_used(self) -> int:
         if self._shared_root is not None:
-            return self._shared_root.usd_used
+            return self._shared_root.cost_used
         if self._state is None:
-            return 0.0
+            return 0
         return self._state.root_totals()[1]
 
     @property
@@ -382,6 +472,36 @@ class BudgetGuard:
         if self._state.scope_kind == "root":
             return self.root_tokens_used
         return self.local_tokens_used
+
+    @property
+    def cost_used(self) -> int:
+        if self._state is None:
+            return 0
+        if self._state.scope_kind == "root":
+            return self.root_cost_used
+        return self.local_cost_used
+
+    @property
+    def local_usd_used(self) -> float:
+        if self._state is None:
+            return 0.0
+        cu_per_usd = None
+        if self._shared_root is not None:
+            cu_per_usd = self._shared_root.cu_per_usd
+        if not cu_per_usd:
+            return 0.0
+        return self.local_cost_used / cu_per_usd
+
+    @property
+    def root_usd_used(self) -> float:
+        if self._state is None:
+            return 0.0
+        cu_per_usd = None
+        if self._shared_root is not None:
+            cu_per_usd = self._shared_root.cu_per_usd
+        if not cu_per_usd:
+            return 0.0
+        return self.root_cost_used / cu_per_usd
 
     @property
     def usd_used(self) -> float:

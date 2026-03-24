@@ -49,9 +49,9 @@ config file.
 Legacy `timeout_s` and `max_retries` remain supported as compatibility aliases,
 but new code should prefer the budget- and event-specific transport settings.
 
-## Set a USD limit
+## Set a token limit
 
-Stop spending as soon as a run crosses $0.05:
+Stop a run once it crosses 50,000 tokens:
 
 ```python
 import openai
@@ -72,7 +72,7 @@ guard = None
 
 try:
     with ag.run(user_id="alice"):
-        with ag.budget_guard(usd_limit=0.05) as g:
+        with ag.budget_guard(token_limit=50_000) as g:
             guard = g
             response = oai.chat.completions.create(
                 model="gpt-4o",
@@ -87,12 +87,12 @@ except BudgetTransportError as e:
     print(f"Budget transport failed: {e}")
 finally:
     if guard is not None:
-        print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
+        print(f"Used {guard.tokens_used} tokens")
 ```
 
 If the gateway is unavailable, budget reserve/settle degrades open after the
 configured budget transport deadline instead of blocking the agent loop for a
-long retry sequence.
+long retry sequence. Local runtime blocking uses `token_limit`.
 
 ## Nested budget scopes
 
@@ -100,9 +100,9 @@ You can attach nested scopes to the same run:
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(name="root", usd_limit=0.10) as root:
+    with ag.budget_guard(name="root", token_limit=100_000) as root:
         ...
-        with ag.budget_guard(name="search", usd_limit=0.02) as search:
+        with ag.budget_guard(name="search", token_limit=20_000) as search:
             ...
 ```
 
@@ -122,14 +122,14 @@ async def main():
     oai = openai.AsyncOpenAI()
 
     async with ag.run(user_id="dave"):
-        async with ag.budget_guard(usd_limit=0.10) as guard:
+        async with ag.budget_guard(token_limit=100_000) as guard:
             response = await oai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Hello!"}],
             )
             print(response.choices[0].message.content)
 
-    print(f"Used ${guard.usd_used:.4f}")
+    print(f"Used {guard.tokens_used} tokens")
 
 asyncio.run(main())
 ```
@@ -140,7 +140,7 @@ Streaming responses are fully supported:
 
 ```python
 with ag.run(user_id="eve"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         stream = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Tell me a story."}],
@@ -150,7 +150,7 @@ with ag.run(user_id="eve"):
             if chunk.choices[0].delta.content:
                 print(chunk.choices[0].delta.content, end="", flush=True)
 
-print(f"\nUsed ${guard.usd_used:.4f}")
+print(f"\nUsed {guard.tokens_used} tokens")
 ```
 
 For OpenAI chat-completions streams, ActGuard injects `stream_options={"include_usage": true}` so the final chunk includes usage data.

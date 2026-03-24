@@ -37,8 +37,7 @@ class RunState:
         *,
         user_id: Optional[str],
         scope_name: Optional[str],
-        usd_limit: Optional[float],
-        usd_limit_micros: Optional[int],
+        cost_limit: Optional[int],
         plan_key: Optional[str],
     ) -> tuple["SharedBudgetState", bool]:
         from actguard.core.budget_context import SharedBudgetState
@@ -50,8 +49,7 @@ class RunState:
                     user_id=user_id,
                     run_id=self.run_id,
                     root_scope_name=scope_name,
-                    root_budget_limit=usd_limit,
-                    root_budget_limit_micros=usd_limit_micros,
+                    root_cost_limit=cost_limit,
                     plan_key=plan_key,
                 )
                 created = True
@@ -69,7 +67,8 @@ class RunState:
 
 _run_state: ContextVar[Optional[RunState]] = ContextVar("_run_state", default=None)
 
-# Fallback registry for threads that don't inherit ContextVar (Python < 3.12 thread pools).
+# Fallback registry for threads that don't inherit ContextVar
+# (Python < 3.12 thread pools).
 # Keyed by id() since RunState is not hashable (contains Lock/dict fields).
 _active_states: Dict[int, RunState] = {}
 _active_states_lock: Lock = Lock()

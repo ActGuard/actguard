@@ -40,14 +40,14 @@ ag = Client.from_env()
 oai = openai.OpenAI()
 
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         response = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Explain async/await in Python."}],
         )
         print(response.choices[0].message.content)
 
-print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
+print(f"{guard.tokens_used} tokens")
 ```
 
 ## Chat completions (streaming)
@@ -56,7 +56,7 @@ For streaming, actguard automatically injects `stream_options={"include_usage": 
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         stream = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Write a haiku."}],
@@ -66,7 +66,7 @@ with ag.run(user_id="alice"):
             delta = chunk.choices[0].delta.content or ""
             print(delta, end="", flush=True)
 
-print(f"\n${guard.usd_used:.6f}")
+print(f"\n{guard.tokens_used} tokens")
 ```
 
 ## Async client
@@ -81,12 +81,12 @@ oai = openai.AsyncOpenAI()
 
 async def main():
     async with ag.run(user_id="alice"):
-        async with ag.budget_guard(usd_limit=0.10) as guard:
+        async with ag.budget_guard(token_limit=100_000) as guard:
             response = await oai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Hello!"}],
             )
-    print(f"${guard.usd_used:.6f}")
+    print(f"{guard.tokens_used} tokens")
 
 asyncio.run(main())
 ```

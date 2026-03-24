@@ -80,7 +80,21 @@ def idempotent(
     on_duplicate: Literal["return", "raise"] = "return",
     safe_exceptions: tuple = (),
 ):
-    """Enforce at-most-once execution per (tool_id, idempotency_key) in a run."""
+    """Prevent duplicate execution for the same ``idempotency_key`` in a run.
+
+    Use this for side-effecting tools such as payments, writes, or outbound API
+    calls where the same logical request must not execute twice.
+
+    The decorated function must declare ``idempotency_key``, callers must pass
+    it, and the tool must run inside ``client.run(...)``.
+
+    Args:
+        ttl_s: How long to remember completed or in-progress keys.
+        on_duplicate: ``"return"`` returns the cached result for a completed
+            key, while ``"raise"`` raises ``DuplicateIdempotencyKey``.
+        safe_exceptions: Exception types that should release the key so the
+            caller can retry instead of marking the outcome as unknown.
+    """
     if fn is None:
         return lambda f: idempotent(
             f,

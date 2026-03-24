@@ -9,16 +9,44 @@ import pytest
 
 import actguard
 from actguard.client import DEFAULT_GATEWAY_URL
-from actguard.core.budget_context import get_budget_state
+from actguard.core.budget_context import get_budget_state, record_usage
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
+from actguard.costs import CuTariff
 from actguard.exceptions import (
     ActGuardPaymentRequired,
+    BudgetExceededError,
     BudgetTransportError,
     MissingRuntimeContextError,
     MonitoringDegradedError,
     NestedRuntimeContextError,
 )
+from actguard.reporting import record_response_usage
+
+
+@pytest.fixture(autouse=True)
+def stub_cu_tariff(monkeypatch):
+    tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-test",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-test",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                }
+            },
+            "tools": {},
+        }
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "get_cu_tariff",
+        lambda self, force_refresh=False: tariff,
+    )
+    return tariff
 
 
 def test_client_from_file_creates_usable_client(tmp_path):
@@ -205,20 +233,20 @@ def test_reserve_budget_posts_expected_request_shape(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(
+    reserve_response = client.reserve_budget(
         run_id="run-1",
-        usd_limit_micros=500_000,
+        cost_limit=500,
         plan_key="pro",
         user_id="alice",
     )
 
-    assert reserve_id == "res-123"
+    assert reserve_response == {"status": "reserved", "reserve_id": "res-123"}
     assert captured["url"] == "https://gw.example/api/v1/reserve"
     assert captured["auth"] == "Bearer sk-test"
     assert captured["content_type"] == "application/json"
     assert captured["payload"] == {
         "run_id": "run-1",
-        "usd_limit_micros": 500_000,
+        "cost_limit": 500,
         "plan_key": "pro",
         "user_id": "alice",
     }
@@ -242,7 +270,7 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
             return None
 
         def read(self):
-            return b"{}"
+            return b'{"status":"settled","settled_micros":123}'
 
     def fake_urlopen(request, timeout, context=None):
         captured["url"] = request.full_url
@@ -254,27 +282,117 @@ def test_settle_budget_posts_expected_request_shape(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client.settle_budget(
+    response = client.settle_budget(
         reserve_id="res-123",
-        provider="openai",
-        provider_model_id="gpt-4o-mini",
         input_tokens=931,
         cached_input_tokens=0,
         output_tokens=30,
+        usage_breakdown=[
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o-mini",
+                "input_tokens": 931,
+                "cached_input_tokens": 0,
+                "output_tokens": 30,
+            }
+        ],
     )
 
     assert captured["url"] == "https://gw.example/api/v1/settle"
     assert captured["auth"] == "Bearer sk-test"
     assert captured["payload"] == {
         "reserve_id": "res-123",
-        "provider": "openai",
-        "provider_model_id": "gpt-4o-mini",
         "input_tokens": 931,
         "cached_input_tokens": 0,
         "output_tokens": 30,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o-mini",
+                "input_tokens": 931,
+                "cached_input_tokens": 0,
+                "output_tokens": 30,
+            }
+        ],
     }
+    assert response == {"status": "settled", "settled_micros": 123}
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
     assert isinstance(captured["context"], ssl.SSLContext)
+
+
+def test_settle_budget_includes_optional_backend_schema_fields(monkeypatch):
+    captured = {}
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=0,
+    )
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return (
+                b'{"status":"settled","settled_micros":123,'
+                b'"overshoot_micros":45}'
+            )
+
+    def fake_urlopen(request, timeout, context=None):
+        captured["payload"] = json.loads(request.data.decode())
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    response = client.settle_budget(
+        reserve_id="res-123",
+        input_tokens=931,
+        cached_input_tokens=0,
+        output_tokens=30,
+        usage_breakdown=[
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o-mini",
+                "input_tokens": 931,
+                "cached_input_tokens": 0,
+                "output_tokens": 30,
+                "scope_name": "search_tool",
+            }
+        ],
+        cache_write_tokens_5m=12,
+        cache_write_tokens_1h=34,
+        web_search_count=2,
+        reasoning_effort="high",
+    )
+
+    assert captured["payload"] == {
+        "reserve_id": "res-123",
+        "input_tokens": 931,
+        "cached_input_tokens": 0,
+        "output_tokens": 30,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o-mini",
+                "input_tokens": 931,
+                "cached_input_tokens": 0,
+                "output_tokens": 30,
+                "scope_name": "search_tool",
+            }
+        ],
+        "cache_write_tokens_5m": 12,
+        "cache_write_tokens_1h": 34,
+        "web_search_count": 2,
+        "reasoning_effort": "high",
+    }
+    assert response == {
+        "status": "settled",
+        "settled_micros": 123,
+        "overshoot_micros": 45,
+    }
 
 
 def test_reserve_budget_http_gateway_omits_ssl_context(monkeypatch):
@@ -303,9 +421,9 @@ def test_reserve_budget_http_gateway_omits_ssl_context(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+    reserve_response = client.reserve_budget(run_id="run-1", cost_limit=500)
 
-    assert reserve_id == "res-123"
+    assert reserve_response == {"status": "reserved", "reserve_id": "res-123"}
     assert captured["url"] == "http://localhost:8787/api/v1/reserve"
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
     assert captured["context"] is None
@@ -337,9 +455,9 @@ def test_reserve_budget_omits_limit_when_unknown(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(run_id="run-1", usd_limit_micros=None)
+    reserve_response = client.reserve_budget(run_id="run-1", cost_limit=None)
 
-    assert reserve_id == "res-123"
+    assert reserve_response == {"status": "reserved", "reserve_id": "res-123"}
     assert captured["payload"] == {"run_id": "run-1"}
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
     assert isinstance(captured["context"], ssl.SSLContext)
@@ -371,15 +489,15 @@ def test_reserve_budget_omits_optional_root_metadata_when_unknown(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    reserve_id = client.reserve_budget(
+    reserve_response = client.reserve_budget(
         run_id="run-1",
-        usd_limit_micros=500_000,
+        cost_limit=500,
         plan_key="",
         user_id="",
     )
 
-    assert reserve_id == "res-123"
-    assert captured["payload"] == {"run_id": "run-1", "usd_limit_micros": 500_000}
+    assert reserve_response == {"status": "reserved", "reserve_id": "res-123"}
+    assert captured["payload"] == {"run_id": "run-1", "cost_limit": 500}
     assert captured["timeout"] == pytest.approx(client.budget_timeout_s, rel=1e-3)
     assert isinstance(captured["context"], ssl.SSLContext)
 
@@ -407,7 +525,7 @@ def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
 
     with pytest.raises(ActGuardPaymentRequired) as excinfo:
-        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+        client.reserve_budget(run_id="run-1", cost_limit=500)
 
     assert attempts["count"] == 1
     assert sleeps == []
@@ -442,11 +560,18 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     with pytest.raises(ActGuardPaymentRequired) as excinfo:
         client.settle_budget(
             reserve_id="res-123",
-            provider="openai",
-            provider_model_id="gpt-4o-mini",
             input_tokens=11,
             cached_input_tokens=0,
             output_tokens=7,
+            usage_breakdown=[
+                {
+                    "provider": "openai",
+                    "provider_model_id": "gpt-4o-mini",
+                    "input_tokens": 11,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 7,
+                }
+            ],
         )
 
     assert attempts["count"] == 1
@@ -455,6 +580,47 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     assert excinfo.value.status == 402
     assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
     assert excinfo.value.__cause__.code == 402
+
+
+def test_reserve_budget_409_raises_budget_exceeded_without_retry(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=8,
+    )
+    attempts = {"count": 0}
+    sleeps: list[float] = []
+
+    def fake_urlopen(request, timeout, context=None):
+        attempts["count"] += 1
+        raise urllib.error.HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(
+                b'{"error":"budget_exceeded","user_id":"alice","tokens_used":200,'
+                b'"cost_used":17,"cost_limit":10}'
+            ),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
+
+    with pytest.raises(BudgetExceededError) as excinfo:
+        client.reserve_budget(run_id="run-1", cost_limit=500)
+
+    assert attempts["count"] == 1
+    assert sleeps == []
+    assert excinfo.value.origin == "remote"
+    assert excinfo.value.path == "/api/v1/reserve"
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.user_id == "alice"
+    assert excinfo.value.tokens_used == 200
+    assert excinfo.value.cost_used == 17
+    assert excinfo.value.cost_limit == 10
+    assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
+    assert excinfo.value.__cause__.code == 409
 
 
 def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
@@ -480,14 +646,14 @@ def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
 
     with pytest.raises(BudgetTransportError) as excinfo:
-        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+        client.reserve_budget(run_id="run-1", cost_limit=500)
 
     assert attempts["count"] == 1
     assert sleeps == []
     assert "status 401" in str(excinfo.value)
 
 
-def test_settle_budget_409_remains_budget_transport_error_without_retry(monkeypatch):
+def test_settle_budget_409_raises_budget_exceeded_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
@@ -503,26 +669,43 @@ def test_settle_budget_409_remains_budget_transport_error_without_retry(monkeypa
             409,
             "Conflict",
             hdrs=None,
-            fp=io.BytesIO(b'{"error":"reservation not found"}'),
+            fp=io.BytesIO(
+                b'{"error":"budget_exceeded","user_id":"alice","tokens_used":18,'
+                b'"cost_used":12,"cost_limit":10}'
+            ),
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr("time.sleep", lambda delay: sleeps.append(delay))
 
-    with pytest.raises(BudgetTransportError) as excinfo:
+    with pytest.raises(BudgetExceededError) as excinfo:
         client.settle_budget(
             reserve_id="res-123",
-            provider="openai",
-            provider_model_id="gpt-4o-mini",
             input_tokens=11,
             cached_input_tokens=2,
             output_tokens=7,
+            usage_breakdown=[
+                {
+                    "provider": "openai",
+                    "provider_model_id": "gpt-4o-mini",
+                    "input_tokens": 11,
+                    "cached_input_tokens": 2,
+                    "output_tokens": 7,
+                }
+            ],
         )
 
     assert attempts["count"] == 1
     assert sleeps == []
-    assert "status 409" in str(excinfo.value)
-    assert "reservation not found" in str(excinfo.value)
+    assert excinfo.value.origin == "remote"
+    assert excinfo.value.path == "/api/v1/settle"
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.user_id == "alice"
+    assert excinfo.value.tokens_used == 18
+    assert excinfo.value.cost_used == 12
+    assert excinfo.value.cost_limit == 10
+    assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
+    assert excinfo.value.__cause__.code == 409
 
 
 def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
@@ -550,7 +733,7 @@ def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     monkeypatch.setattr("random.uniform", lambda lower, upper: 0.0)
 
     with pytest.raises(BudgetTransportError) as excinfo:
-        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+        client.reserve_budget(run_id="run-1", cost_limit=500)
 
     assert attempts["count"] == 3
     assert sleeps == [0.2, 0.4]
@@ -578,7 +761,7 @@ def test_reserve_budget_retry_backoff_respects_total_budget_timeout(monkeypatch)
     monkeypatch.setattr("time.monotonic", lambda: next(monotonic_values))
 
     with pytest.raises(BudgetTransportError):
-        client.reserve_budget(run_id="run-1", usd_limit_micros=500_000)
+        client.reserve_budget(run_id="run-1", cost_limit=500)
 
     assert attempts["count"] == 2
     assert sleeps == [0.2]
@@ -594,7 +777,7 @@ def test_client_budget_guard_sets_and_clears_budget_state(monkeypatch):
     monkeypatch.setattr(client, "settle_budget", lambda **_: None)
 
     with client.run(run_id="run-budget-state"):
-        with client.budget_guard(usd_limit=0.05, plan_key="pro") as guard:
+        with client.budget_guard(cost_limit=50, plan_key="pro") as guard:
             run_state = get_run_state()
             budget_state = get_budget_state()
             assert run_state is not None
@@ -624,7 +807,7 @@ def test_budget_guard_without_api_key_skips_remote_reporting(monkeypatch):
     monkeypatch.setattr(client, "settle_budget", should_not_call)
 
     with client.run(run_id="run-local-only"):
-        with client.budget_guard(usd_limit=0.05):
+        with client.budget_guard(cost_limit=50):
             budget_state = get_budget_state()
             assert budget_state is not None
             assert budget_state.reserve_id is None
@@ -646,7 +829,7 @@ def test_budget_guard_reserve_transport_failure_warns_and_degrades_open(monkeypa
 
     with pytest.warns(RuntimeWarning) as recorded:
         with client.run(run_id="run-warn-reserve"):
-            with client.budget_guard(usd_limit=0.05):
+            with client.budget_guard(cost_limit=50):
                 budget_state = get_budget_state()
                 assert budget_state is not None
                 assert budget_state.reserve_id is None
@@ -657,6 +840,64 @@ def test_budget_guard_reserve_transport_failure_warns_and_degrades_open(monkeypa
     assert warning.error.operation == "reserve"
     assert warning.error.failure_kind == "timeout"
     assert "TimeoutError: timed out" in str(warning)
+
+
+def test_budget_guard_reserve_budget_exceeded_raises(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(
+        client,
+        "reserve_budget",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BudgetExceededError(
+                user_id="alice",
+                tokens_used=200,
+                cost_used=17,
+                cost_limit=10,
+                limit_type="cost",
+                origin="remote",
+                path="/api/v1/reserve",
+                status_code=409,
+            )
+        ),
+    )
+    monkeypatch.setattr(client, "settle_budget", lambda **_kwargs: None)
+
+    with pytest.raises(BudgetExceededError) as excinfo:
+        with client.run(run_id="run-raise-reserve-budget"):
+            with client.budget_guard(cost_limit=50):
+                pass
+
+    assert excinfo.value.path == "/api/v1/reserve"
+    assert excinfo.value.status_code == 409
+    assert get_current_state() is None
+
+
+def test_budget_guard_reserve_payment_required_raises(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(
+        client,
+        "reserve_budget",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ActGuardPaymentRequired(path="/api/v1/reserve")
+        ),
+    )
+    monkeypatch.setattr(client, "settle_budget", lambda **_kwargs: None)
+
+    with pytest.raises(ActGuardPaymentRequired) as excinfo:
+        with client.run(run_id="run-raise-reserve-payment"):
+            with client.budget_guard(cost_limit=50):
+                pass
+
+    assert excinfo.value.path == "/api/v1/reserve"
+    assert get_current_state() is None
 
 
 def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch):
@@ -674,7 +915,7 @@ def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch
 
     with pytest.warns(RuntimeWarning) as recorded:
         with client.run(run_id="run-warn-settle"):
-            with client.budget_guard(usd_limit=0.05):
+            with client.budget_guard(cost_limit=50):
                 pass
 
     warning = recorded[0].message
@@ -683,6 +924,64 @@ def test_budget_guard_settle_transport_failure_warns_without_raising(monkeypatch
     assert warning.error.operation == "settle"
     assert warning.error.failure_kind == "connection"
     assert "ConnectionRefusedError: refused" in str(warning)
+    assert get_current_state() is None
+
+
+def test_budget_guard_settle_budget_exceeded_raises(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(client, "reserve_budget", lambda **_kwargs: "res-123")
+    monkeypatch.setattr(
+        client,
+        "settle_budget",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BudgetExceededError(
+                user_id="alice",
+                tokens_used=18,
+                cost_used=12,
+                cost_limit=10,
+                limit_type="cost",
+                origin="remote",
+                path="/api/v1/settle",
+                status_code=409,
+            )
+        ),
+    )
+
+    with pytest.raises(BudgetExceededError) as excinfo:
+        with client.run(run_id="run-raise-settle-budget"):
+            with client.budget_guard(cost_limit=50):
+                pass
+
+    assert excinfo.value.path == "/api/v1/settle"
+    assert excinfo.value.status_code == 409
+    assert get_current_state() is None
+
+
+def test_budget_guard_settle_payment_required_raises(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+    )
+
+    monkeypatch.setattr(client, "reserve_budget", lambda **_kwargs: "res-123")
+    monkeypatch.setattr(
+        client,
+        "settle_budget",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ActGuardPaymentRequired(path="/api/v1/settle")
+        ),
+    )
+
+    with pytest.raises(ActGuardPaymentRequired) as excinfo:
+        with client.run(run_id="run-raise-settle-payment"):
+            with client.budget_guard(cost_limit=50):
+                pass
+
+    assert excinfo.value.path == "/api/v1/settle"
     assert get_current_state() is None
 
 
@@ -706,7 +1005,7 @@ def test_budget_guard_settle_http_failure_warning_includes_status_summary(monkey
 
     with pytest.warns(RuntimeWarning) as recorded:
         with client.run(run_id="run-warn-settle-http"):
-            with client.budget_guard(usd_limit=0.05):
+            with client.budget_guard(cost_limit=50):
                 pass
 
     warning = recorded[0].message
@@ -721,7 +1020,7 @@ def test_client_budget_guard_requires_active_run():
     client = actguard.Client()
 
     with pytest.raises(MissingRuntimeContextError):
-        with client.budget_guard(usd_limit=0.05):
+        with client.budget_guard(cost_limit=50):
             pass
 
 
@@ -732,7 +1031,7 @@ def test_client_budget_guard_inside_run_reuses_existing_run(monkeypatch):
 
     with client.run(run_id="run-existing", user_id="alice"):
         assert get_budget_state() is None
-        with client.budget_guard(usd_limit=0.1):
+        with client.budget_guard(cost_limit=100):
             run_state = get_run_state()
             budget_state = get_budget_state()
             assert run_state is not None
@@ -746,7 +1045,11 @@ def test_client_budget_guard_inside_run_reuses_existing_run(monkeypatch):
 
 
 def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
-    client = actguard.Client(gateway_url="https://gw.example", api_key="sk-test")
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        event_mode="off",
+    )
     calls = []
 
     def reserve(**kwargs):
@@ -761,7 +1064,7 @@ def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
     monkeypatch.setattr(client, "settle_budget", settle)
 
     with client.run(run_id="run-hooks"):
-        with client.budget_guard(usd_limit=0.1, plan_key="pro") as guard:
+        with client.budget_guard(cost_limit=100, plan_key="pro") as guard:
             budget_state = get_budget_state()
             assert budget_state is not None
             assert budget_state.reserve_id == "res_123"
@@ -774,8 +1077,275 @@ def test_client_budget_guard_calls_reserve_and_settle_hooks(monkeypatch):
             assert guard.run_id == budget_state.run_id
 
     assert [name for name, _ in calls] == ["reserve", "settle"]
-    assert calls[0][1]["usd_limit_micros"] == 100_000
+    assert calls[0][1]["cost_limit"] == 100
     assert calls[0][1]["plan_key"] == "pro"
+    assert calls[1][1] == {
+        "reserve_id": "res_123",
+        "input_tokens": 11,
+        "cached_input_tokens": 2,
+        "output_tokens": 7,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o-mini",
+                "input_tokens": 11,
+                "cached_input_tokens": 2,
+                "output_tokens": 7,
+            }
+        ],
+    }
+    client.close()
+
+
+def test_client_budget_guard_settle_preserves_per_call_usage_breakdown(monkeypatch):
+    captured: list[tuple[str, dict]] = []
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def getcode(self) -> int:
+            return self.status
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(request, timeout, context=None):
+        captured.append((request.full_url, json.loads(request.data.decode())))
+        if request.full_url.endswith("/api/v1/reserve"):
+            return _Response(b'{"reserve_id":"res-multi"}')
+        return _Response(b"{}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=0,
+        event_mode="off",
+    )
+
+    with client.run(run_id="run-multi-settle"):
+        with client.budget_guard(name="search_tool", cost_limit=100):
+            record_usage(
+                provider="openai",
+                provider_model_id="gpt-4o",
+                input_tokens=10,
+                cached_input_tokens=1,
+                output_tokens=5,
+            )
+            record_usage(
+                provider="anthropic",
+                provider_model_id="claude-sonnet-4",
+                input_tokens=3,
+                output_tokens=2,
+            )
+            record_usage(
+                provider="openai",
+                provider_model_id="gpt-4o",
+                input_tokens=4,
+                cached_input_tokens=1,
+                output_tokens=1,
+            )
+
+    budget_requests = [
+        (url, payload)
+        for url, payload in captured
+        if url.endswith("/api/v1/reserve") or url.endswith("/api/v1/settle")
+    ]
+
+    assert [url for url, _ in budget_requests] == [
+        "https://gw.example/api/v1/reserve",
+        "https://gw.example/api/v1/settle",
+    ]
+    assert budget_requests[1][1] == {
+        "reserve_id": "res-multi",
+        "input_tokens": 17,
+        "cached_input_tokens": 2,
+        "output_tokens": 8,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o",
+                "input_tokens": 10,
+                "cached_input_tokens": 1,
+                "output_tokens": 5,
+                "scope_name": "search_tool",
+            },
+            {
+                "provider": "anthropic",
+                "provider_model_id": "claude-sonnet-4",
+                "input_tokens": 3,
+                "cached_input_tokens": 0,
+                "output_tokens": 2,
+                "scope_name": "search_tool",
+            },
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o",
+                "input_tokens": 4,
+                "cached_input_tokens": 1,
+                "output_tokens": 1,
+                "scope_name": "search_tool",
+            },
+        ],
+    }
+    client.close()
+
+
+def test_client_budget_guard_usage_breakdown_uses_active_scope_name(monkeypatch):
+    captured: list[tuple[str, dict]] = []
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def getcode(self) -> int:
+            return self.status
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(request, timeout, context=None):
+        captured.append((request.full_url, json.loads(request.data.decode())))
+        if request.full_url.endswith("/api/v1/reserve"):
+            return _Response(b'{"reserve_id":"res-scope-name"}')
+        return _Response(b"{}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=0,
+        event_mode="off",
+    )
+
+    with client.run(run_id="run-scope-name-settle"):
+        with client.budget_guard(cost_limit=100):
+            record_usage(
+                provider="openai",
+                provider_model_id="gpt-4o",
+                input_tokens=2,
+                output_tokens=1,
+            )
+            with client.budget_guard(name="search_tool", cost_limit=50):
+                record_usage(
+                    provider="anthropic",
+                    provider_model_id="claude-sonnet-4",
+                    input_tokens=4,
+                    cached_input_tokens=1,
+                    output_tokens=3,
+                )
+
+    budget_requests = [
+        (url, payload)
+        for url, payload in captured
+        if url.endswith("/api/v1/reserve") or url.endswith("/api/v1/settle")
+    ]
+
+    assert [url for url, _ in budget_requests] == [
+        "https://gw.example/api/v1/reserve",
+        "https://gw.example/api/v1/settle",
+    ]
+    assert budget_requests[1][1] == {
+        "reserve_id": "res-scope-name",
+        "input_tokens": 6,
+        "cached_input_tokens": 1,
+        "output_tokens": 4,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o",
+                "input_tokens": 2,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+            },
+            {
+                "provider": "anthropic",
+                "provider_model_id": "claude-sonnet-4",
+                "input_tokens": 4,
+                "cached_input_tokens": 1,
+                "output_tokens": 3,
+                "scope_name": "search_tool",
+            },
+        ],
+    }
+    client.close()
+
+
+def test_client_budget_guard_settles_when_limit_is_exceeded(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        event_mode="off",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        client,
+        "reserve_budget",
+        lambda **kwargs: calls.append(("reserve", kwargs)) or "res-blocked",
+    )
+    monkeypatch.setattr(
+        client,
+        "settle_budget",
+        lambda **kwargs: calls.append(("settle", kwargs)) or None,
+    )
+
+    raw = type(
+        "UsageResponse",
+        (),
+        {
+            "usage_metadata": {
+                "input_tokens": 31,
+                "output_tokens": 5,
+                "input_token_details": {"cache_read": 7},
+            },
+            "response_metadata": {
+                "model_name": "gpt-4o",
+                "token_usage": {"prompt_tokens": 31, "completion_tokens": 5},
+            },
+        },
+    )()
+
+    with pytest.raises(BudgetExceededError):
+        with client.run(run_id="run-blocked-settle", user_id="alice"):
+            with client.budget_guard(name="search_tool", cost_limit=3):
+                assert record_response_usage({"raw": raw}, provider="openai")
+
+    assert [name for name, _ in calls] == ["reserve", "settle"]
+    assert calls[1][1] == {
+        "reserve_id": "res-blocked",
+        "input_tokens": 31,
+        "cached_input_tokens": 7,
+        "output_tokens": 5,
+        "usage_breakdown": [
+            {
+                "provider": "openai",
+                "provider_model_id": "gpt-4o",
+                "input_tokens": 31,
+                "cached_input_tokens": 7,
+                "output_tokens": 5,
+                "scope_name": "search_tool",
+            }
+        ],
+    }
+    client.close()
 
 
 def test_client_budget_guard_debug_mode_still_calls_real_settle(monkeypatch):
@@ -815,7 +1385,7 @@ def test_client_budget_guard_debug_mode_still_calls_real_settle(monkeypatch):
     )
 
     with client.run(run_id="run-debug-settle"):
-        with client.budget_guard(usd_limit=0.1):
+        with client.budget_guard(cost_limit=100):
             budget_state = get_budget_state()
             assert budget_state is not None
             budget_state.provider = "openai"
@@ -824,18 +1394,33 @@ def test_client_budget_guard_debug_mode_still_calls_real_settle(monkeypatch):
             budget_state.cached_input_tokens = 2
             budget_state.output_tokens = 7
 
-    assert [url for url, _ in captured] == [
+    budget_requests = [
+        (url, payload)
+        for url, payload in captured
+        if url.endswith("/api/v1/reserve") or url.endswith("/api/v1/settle")
+    ]
+
+    assert [url for url, _ in budget_requests] == [
         "https://gw.example/api/v1/reserve",
         "https://gw.example/api/v1/settle",
     ]
-    assert "user_id" not in captured[0][1]
-    assert captured[1][1]["reserve_id"] == "res-debug"
-    assert captured[1][1]["provider"] == "openai"
-    assert captured[1][1]["provider_model_id"] == "gpt-4o-mini"
-    assert captured[1][1]["input_tokens"] == 11
-    assert captured[1][1]["cached_input_tokens"] == 2
-    assert captured[1][1]["output_tokens"] == 7
-    assert "run_id" not in captured[1][1]
+    assert budget_requests[0][1]["cost_limit"] == 100
+    assert "user_id" not in budget_requests[0][1]
+    assert budget_requests[1][1]["reserve_id"] == "res-debug"
+    assert budget_requests[1][1]["input_tokens"] == 11
+    assert budget_requests[1][1]["cached_input_tokens"] == 2
+    assert budget_requests[1][1]["output_tokens"] == 7
+    assert budget_requests[1][1]["usage_breakdown"] == [
+        {
+            "provider": "openai",
+            "provider_model_id": "gpt-4o-mini",
+            "input_tokens": 11,
+            "cached_input_tokens": 2,
+            "output_tokens": 7,
+        }
+    ]
+    assert "run_id" not in budget_requests[1][1]
+    client.close()
 
 
 def test_budget_guard_no_leakage_between_clients(monkeypatch):
@@ -866,16 +1451,16 @@ def test_budget_guard_no_leakage_between_clients(monkeypatch):
     )
 
     with client_a.run(run_id="run-a"):
-        with client_a.budget_guard(run_id="run-a", usd_limit=0.2):
+        with client_a.budget_guard(run_id="run-a", cost_limit=100):
             pass
     with client_b.run(run_id="run-b"):
-        with client_b.budget_guard(run_id="run-b", usd_limit=0.3):
+        with client_b.budget_guard(run_id="run-b", cost_limit=100):
             pass
 
     assert calls_a[0][1]["run_id"] == "run-a"
-    assert calls_a[0][1]["usd_limit_micros"] == 200_000
+    assert calls_a[0][1]["cost_limit"] == 100
     assert calls_b[0][1]["run_id"] == "run-b"
-    assert calls_b[0][1]["usd_limit_micros"] == 300_000
+    assert calls_b[0][1]["cost_limit"] == 100
 
 
 def test_client_close_waits_for_event_client_shutdown():

@@ -18,23 +18,48 @@ class BudgetTransport:
         self._config = config
 
     def post(self, *, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        from actguard.exceptions import ActGuardPaymentRequired, BudgetTransportError
+        return self._request_json(
+            method="POST",
+            path=path,
+            payload=payload,
+            require_auth=True,
+        )
+
+    def get_public(self, *, path: str) -> Mapping[str, Any]:
+        return self._request_json(
+            method="GET",
+            path=path,
+            payload=None,
+            require_auth=False,
+        )
+
+    def _request_json(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]],
+        require_auth: bool,
+    ) -> Mapping[str, Any]:
+        from actguard.exceptions import (
+            ActGuardPaymentRequired,
+            BudgetTransportError,
+        )
 
         if not self._config.gateway_url:
             raise BudgetTransportError(
                 "Client.gateway_url is required for budget reserve/settle APIs."
             )
-        if not self._config.api_key:
+        if require_auth and not self._config.api_key:
             raise BudgetTransportError(
                 "Client.api_key is required for budget reserve/settle APIs."
             )
 
-        body = json.dumps(payload).encode()
+        body = json.dumps(payload).encode() if payload is not None else None
         url = self._config.gateway_url.rstrip("/") + path
-        headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if require_auth:
+            headers["Authorization"] = f"Bearer {self._config.api_key}"
 
         deadline = time.monotonic() + self._config.budget_timeout_s
         last_error: Optional[Exception] = None
@@ -48,7 +73,7 @@ class BudgetTransport:
                     url,
                     data=body,
                     headers=headers,
-                    method="POST",
+                    method=method,
                 )
                 trace = start_debug_trace(
                     request=req,
@@ -75,7 +100,13 @@ class BudgetTransport:
                     raise ActGuardPaymentRequired(
                         path=path, status=status, cause=exc
                     ) from exc
-                if status in (400, 401, 403, 409, 422):
+                if status == 409:
+                    raise _budget_limit_exceeded_error(
+                        path=path,
+                        status=status,
+                        exc=exc,
+                    ) from exc
+                if status in (400, 401, 403, 422):
                     raise BudgetTransportError(
                         _budget_http_error_message(
                             status=status,
@@ -131,7 +162,56 @@ def _budget_http_error_message(
     return f"Budget API request failed with status {status} at {path}."
 
 
+def _budget_limit_exceeded_error(
+    *,
+    path: str,
+    status: int,
+    exc: urllib.error.HTTPError,
+):
+    from actguard.exceptions import BudgetExceededError
+
+    parsed = _http_error_payload(exc)
+    detail = _http_error_detail_from_payload(parsed)
+    user_id = None
+    tokens_used = 0
+    cost_used = 0
+    cost_limit = None
+
+    if isinstance(parsed, dict):
+        raw_user_id = parsed.get("user_id")
+        if isinstance(raw_user_id, str) and raw_user_id:
+            user_id = raw_user_id
+        raw_tokens_used = parsed.get("tokens_used")
+        if isinstance(raw_tokens_used, int):
+            tokens_used = raw_tokens_used
+        raw_cost_used = parsed.get("cost_used")
+        if isinstance(raw_cost_used, int):
+            cost_used = raw_cost_used
+        raw_cost_limit = parsed.get("cost_limit")
+        if isinstance(raw_cost_limit, int):
+            cost_limit = raw_cost_limit
+
+    error = BudgetExceededError(
+        user_id=user_id,
+        tokens_used=tokens_used,
+        cost_used=cost_used,
+        cost_limit=cost_limit,
+        limit_type="cost",
+        origin="remote",
+        path=path,
+        status_code=status,
+        cause=exc,
+    )
+    if detail:
+        error.details["summary"] = detail
+    return error
+
+
 def _http_error_detail(exc: urllib.error.HTTPError) -> str | None:
+    return _http_error_detail_from_payload(_http_error_payload(exc))
+
+
+def _http_error_payload(exc: urllib.error.HTTPError) -> object | None:
     try:
         raw = exc.read()
     except Exception:
@@ -146,12 +226,29 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str | None:
     if not stripped:
         return None
     try:
-        parsed = json.loads(stripped)
+        return json.loads(stripped)
     except Exception:
         return stripped
-    if isinstance(parsed, dict):
+
+
+def _normalize_http_error_payload(payload: Mapping[str, Any]) -> str | None:
+    try:
+        rendered = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return None
+    stripped = " ".join(rendered.strip().split())
+    return stripped or None
+
+
+def _http_error_detail_from_payload(payload: object | None) -> str | None:
+    if isinstance(payload, dict):
         for key in ("error", "message", "detail"):
-            value = parsed.get(key)
+            value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    return stripped
+        return _normalize_http_error_payload(payload)
+
+    if isinstance(payload, str):
+        stripped = " ".join(payload.strip().split())
+        return stripped or None
+    return None

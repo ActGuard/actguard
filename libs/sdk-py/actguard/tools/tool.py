@@ -18,10 +18,31 @@ def tool(
     idempotent=None,
     policy=None,
 ):
-    """Unified decorator. Each kwarg maps to the corresponding standalone decorator.
+    """Apply multiple runtime tool guardrails with one decorator.
 
-    Unspecified guards are not applied. Execution order:
-    idempotent → max_attempts → circuit_breaker → rate_limit → timeout → fn.
+    Use this when a single tool needs more than one of the standard runtime
+    protections, such as rate limiting, circuit breaking, max-attempts,
+    idempotency, or timeouts.
+
+    Each kwarg maps to the corresponding standalone decorator. Unspecified
+    guards are not applied.
+
+    ``max_attempts`` and ``idempotent`` require an active ``client.run(...)``
+    scope. ``prove`` and ``enforce`` are not composed here; keep those as
+    separate decorators because they depend on ``actguard.session(...)``.
+
+    Execution order:
+    ``idempotent -> max_attempts -> circuit_breaker -> rate_limit -> timeout -> fn``
+
+    Example:
+        >>> @actguard.tool(
+        ...     idempotent={"ttl_s": 600},
+        ...     max_attempts={"calls": 3},
+        ...     rate_limit={"max_calls": 10, "period": 60, "scope": "user_id"},
+        ...     timeout=2.0,
+        ... )
+        ... def search_web(user_id: str, query: str, *, idempotency_key: str) -> str:
+        ...     ...
     """
     if fn is None:
         return lambda f: tool(

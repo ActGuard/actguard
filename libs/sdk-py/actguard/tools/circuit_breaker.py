@@ -68,7 +68,19 @@ def circuit_breaker(
     fail_on=FAIL_ON_DEFAULT,
     ignore_on=IGNORE_ON_DEFAULT,
 ):
-    """Circuit breaker decorator (sync + async)."""
+    """Short-circuit calls after repeated failures from one dependency.
+
+    Use this around tools that call an external service which can become
+    unhealthy. Once enough counted failures occur, the circuit opens and future
+    calls fail fast until ``reset_timeout`` elapses.
+
+    Args:
+        name: Stable dependency name used in errors and observability.
+        max_fails: Number of counted failures before the circuit opens.
+        reset_timeout: Seconds to wait before allowing another call.
+        fail_on: Failure kinds that count toward opening the circuit.
+        ignore_on: Failure kinds that never count toward opening the circuit.
+    """
     if fn is None:
         return lambda f: circuit_breaker(
             f,

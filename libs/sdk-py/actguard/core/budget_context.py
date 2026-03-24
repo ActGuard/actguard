@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Dict, Literal, Optional
 
+from actguard.costs import CuTariff
+
 ScopeKind = Literal["root", "nested"]
 
 
@@ -23,23 +25,50 @@ def _current_execution_key() -> tuple[int, Optional[int]]:
 
 
 @dataclass
+class UsageBreakdownEntry:
+    provider: str
+    provider_model_id: str
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    scope_name: Optional[str] = None
+
+    def as_payload(self) -> dict:
+        payload = {
+            "provider": self.provider,
+            "provider_model_id": self.provider_model_id,
+            "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "output_tokens": self.output_tokens,
+        }
+        if self.scope_name:
+            payload["scope_name"] = self.scope_name
+        return payload
+
+
+@dataclass
 class SharedBudgetState:
     user_id: Optional[str]
     run_id: str
     tenant_id: str = ""
     root_scope_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     root_scope_name: Optional[str] = None
-    root_budget_limit: Optional[float] = None
-    root_budget_limit_micros: Optional[int] = None
+    root_cost_limit: Optional[int] = None
     plan_key: Optional[str] = None
     reserve_id: Optional[str] = None
+    tariff: Optional[CuTariff] = None
+    tariff_version: Optional[str] = None
+    registry_version: Optional[str] = None
+    cu_per_usd: Optional[int] = None
+    estimated_usd_micros: Optional[int] = None
     provider: str = ""
     provider_model_id: str = ""
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
     tokens_used: int = 0
-    usd_used: float = 0.0
+    cost_used: int = 0
+    usage_breakdown: list[UsageBreakdownEntry] = field(default_factory=list)
     _attachments: int = 0
     _settled: bool = False
     _lock: Lock = field(default_factory=Lock)
@@ -62,6 +91,7 @@ class SharedBudgetState:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int = 0,
+        scope_name: Optional[str] = None,
     ) -> None:
         with self._lock:
             self.provider = provider
@@ -71,6 +101,33 @@ class SharedBudgetState:
             self.cached_input_tokens += cached_input_tokens
             self.output_tokens += output_tokens
             self.tokens_used += input_tokens + output_tokens
+            if self.tariff is not None:
+                self.cost_used += self.tariff.llm_cost(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                )
+            self.usage_breakdown.append(
+                UsageBreakdownEntry(
+                    provider=provider,
+                    provider_model_id=provider_model_id,
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    output_tokens=output_tokens,
+                    scope_name=scope_name,
+                )
+            )
+
+    def usage_breakdown_payload(self) -> list[dict]:
+        with self._lock:
+            return [entry.as_payload() for entry in self.usage_breakdown]
+
+    def install_tariff(self, tariff: CuTariff) -> None:
+        with self._lock:
+            self.tariff = tariff
+            self.tariff_version = tariff.tariff_version
+            self.registry_version = tariff.registry_version
+            self.cu_per_usd = tariff.cu_per_usd
 
     def mark_settled(self) -> bool:
         with self._lock:
@@ -90,17 +147,20 @@ class BudgetState:
     scope_kind: ScopeKind = "root"
     parent_scope_id: Optional[str] = None
     root_scope_id: str = ""
+    cost_limit: Optional[int] = None
     usd_limit: Optional[float] = None
     usd_limit_micros: Optional[int] = None
     plan_key: Optional[str] = None
     reserve_id: Optional[str] = None
+    tariff: Optional[CuTariff] = None
+    tariff_version: Optional[str] = None
     provider: str = ""
     provider_model_id: str = ""
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
     tokens_used: int = 0
-    usd_used: float = 0.0
+    cost_used: int = 0
     shared_root: Optional[SharedBudgetState] = None
     _lock: Lock = field(default_factory=Lock)
 
@@ -125,6 +185,15 @@ class BudgetState:
             self.cached_input_tokens += cached_input_tokens
             self.output_tokens += output_tokens
             self.tokens_used += input_tokens + output_tokens
+            tariff = self.tariff
+            if tariff is None and self.shared_root is not None:
+                tariff = self.shared_root.tariff
+            if tariff is not None:
+                self.cost_used += tariff.llm_cost(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                )
 
     def scope_metadata(self) -> dict:
         metadata = {
@@ -138,10 +207,10 @@ class BudgetState:
             metadata["plan_key"] = self.plan_key
         return metadata
 
-    def root_totals(self) -> tuple[int, float]:
+    def root_totals(self) -> tuple[int, int]:
         if self.shared_root is None:
-            return self.tokens_used, self.usd_used
-        return self.shared_root.tokens_used, self.shared_root.usd_used
+            return self.tokens_used, self.cost_used
+        return self.shared_root.tokens_used, self.shared_root.cost_used
 
 
 @dataclass
@@ -166,10 +235,18 @@ class BudgetExecutionContext:
                 scope_kind=scope.scope_kind,
                 parent_scope_id=scope.parent_scope_id,
                 root_scope_id=scope.root_scope_id,
-                usd_limit=scope.usd_limit,
-                usd_limit_micros=scope.usd_limit_micros,
+                cost_limit=scope.cost_limit,
                 plan_key=scope.plan_key,
                 reserve_id=scope.reserve_id,
+                tariff=scope.tariff,
+                tariff_version=scope.tariff_version,
+                provider=scope.provider,
+                provider_model_id=scope.provider_model_id,
+                input_tokens=scope.input_tokens,
+                cached_input_tokens=scope.cached_input_tokens,
+                output_tokens=scope.output_tokens,
+                tokens_used=scope.tokens_used,
+                cost_used=scope.cost_used,
                 shared_root=self.shared_root,
             )
             for scope in self.scope_stack
@@ -274,17 +351,18 @@ def set_budget_state(state: BudgetState) -> Token:
             tenant_id=state.tenant_id,
             root_scope_id=state.root_scope_id or state.scope_id,
             root_scope_name=state.scope_name,
-            root_budget_limit=state.usd_limit,
-            root_budget_limit_micros=state.usd_limit_micros,
+            root_cost_limit=state.cost_limit,
             plan_key=state.plan_key,
             reserve_id=state.reserve_id,
+            tariff=state.tariff,
+            tariff_version=state.tariff_version,
             provider=state.provider,
             provider_model_id=state.provider_model_id,
             input_tokens=state.input_tokens,
             cached_input_tokens=state.cached_input_tokens,
             output_tokens=state.output_tokens,
             tokens_used=state.tokens_used,
-            usd_used=state.usd_used,
+            cost_used=state.cost_used,
         )
         state.shared_root = shared_root
     context = BudgetExecutionContext(
@@ -330,15 +408,25 @@ def build_root_scope_state(shared_root: SharedBudgetState) -> BudgetState:
         scope_kind="root",
         parent_scope_id=None,
         root_scope_id=shared_root.root_scope_id,
-        usd_limit=shared_root.root_budget_limit,
-        usd_limit_micros=shared_root.root_budget_limit_micros,
+        cost_limit=shared_root.root_cost_limit,
         plan_key=shared_root.plan_key,
         reserve_id=shared_root.reserve_id,
+        tariff=shared_root.tariff,
+        tariff_version=shared_root.tariff_version,
+        provider=shared_root.provider,
+        provider_model_id=shared_root.provider_model_id,
+        input_tokens=shared_root.input_tokens,
+        cached_input_tokens=shared_root.cached_input_tokens,
+        output_tokens=shared_root.output_tokens,
+        tokens_used=shared_root.tokens_used,
+        cost_used=shared_root.cost_used,
         shared_root=shared_root,
     )
 
 
-def push_budget_scope(scope: BudgetState, *, inherit_active_source: bool = True) -> Token:
+def push_budget_scope(
+    scope: BudgetState, *, inherit_active_source: bool = True
+) -> Token:
     context = _ensure_execution_context()
     if context is None:
         source = _sole_active_budget_context() if inherit_active_source else None
@@ -351,8 +439,13 @@ def push_budget_scope(scope: BudgetState, *, inherit_active_source: bool = True)
             )
         else:
             if scope.shared_root is None:
-                raise ValueError("push_budget_scope requires a shared_root-backed scope.")
-            new_context = BudgetExecutionContext(shared_root=scope.shared_root, scope_stack=[scope])
+                raise ValueError(
+                    "push_budget_scope requires a shared_root-backed scope."
+                )
+            new_context = BudgetExecutionContext(
+                shared_root=scope.shared_root,
+                scope_stack=[scope],
+            )
     else:
         new_context = BudgetExecutionContext(
             shared_root=context.shared_root,
@@ -385,13 +478,17 @@ def active_scope_metadata() -> Optional[dict]:
 
 
 def blocked_scope_metadata(blocked_scope: BudgetState) -> dict:
-    tokens_used, usd_used = blocked_scope.root_totals()
+    tokens_used, cost_used = blocked_scope.root_totals()
     if blocked_scope.scope_kind != "root" or blocked_scope.shared_root is None:
-        tokens_used, usd_used = blocked_scope.tokens_used, blocked_scope.usd_used
+        tokens_used, cost_used = blocked_scope.tokens_used, blocked_scope.cost_used
     payload = blocked_scope.scope_metadata()
     payload["tokens_used"] = tokens_used
-    payload["usd_used"] = usd_used
-    payload["usd_limit"] = blocked_scope.usd_limit
+    payload["cost_used"] = cost_used
+    payload["cost_limit"] = blocked_scope.cost_limit
+    if blocked_scope.tariff_version:
+        payload["tariff_version"] = blocked_scope.tariff_version
+    elif blocked_scope.shared_root is not None and blocked_scope.shared_root.tariff_version:
+        payload["tariff_version"] = blocked_scope.shared_root.tariff_version
     return payload
 
 
@@ -419,6 +516,7 @@ def record_usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
+                    scope_name=state.scope_name,
                 )
             state.record_usage(
                 provider=provider,
@@ -436,6 +534,7 @@ def record_usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
+            scope_name=active_scope.scope_name,
         )
         for scope in context.scope_stack:
             scope.record_usage(
@@ -455,6 +554,7 @@ def record_usage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
+            scope_name=state.scope_name,
         )
     state.record_usage(
         provider=provider,
@@ -473,17 +573,20 @@ def check_budget_limits() -> Optional[BudgetLimitViolation]:
             state = get_budget_state()
             if state is None:
                 return None
-            if state.usd_limit is not None and state.usd_used >= state.usd_limit:
+            if state.cost_limit is not None and state.cost_used >= state.cost_limit:
                 return BudgetLimitViolation(active_scope=state, blocked_scope=state)
             if (
                 state.shared_root is not None
-                and state.shared_root.root_budget_limit is not None
-                and state.shared_root.usd_used >= state.shared_root.root_budget_limit
+                and state.shared_root.root_cost_limit is not None
+                and state.shared_root.cost_used >= state.shared_root.root_cost_limit
             ):
                 blocked_scope = build_root_scope_state(state.shared_root)
                 blocked_scope.tokens_used = state.shared_root.tokens_used
-                blocked_scope.usd_used = state.shared_root.usd_used
-                return BudgetLimitViolation(active_scope=state, blocked_scope=blocked_scope)
+                blocked_scope.cost_used = state.shared_root.cost_used
+                return BudgetLimitViolation(
+                    active_scope=state,
+                    blocked_scope=blocked_scope,
+                )
             return None
 
     active_scope = context.active_scope()
@@ -491,14 +594,14 @@ def check_budget_limits() -> Optional[BudgetLimitViolation]:
         return None
 
     for scope in reversed(context.scope_stack):
-        if scope.usd_limit is not None and scope.usd_used >= scope.usd_limit:
+        if scope.cost_limit is not None and scope.cost_used >= scope.cost_limit:
             return BudgetLimitViolation(active_scope=active_scope, blocked_scope=scope)
 
-    root_limit = context.shared_root.root_budget_limit
-    if root_limit is not None and context.shared_root.usd_used >= root_limit:
+    root_limit = context.shared_root.root_cost_limit
+    if root_limit is not None and context.shared_root.cost_used >= root_limit:
         root_scope = build_root_scope_state(context.shared_root)
         root_scope.tokens_used = context.shared_root.tokens_used
-        root_scope.usd_used = context.shared_root.usd_used
+        root_scope.cost_used = context.shared_root.cost_used
         return BudgetLimitViolation(active_scope=active_scope, blocked_scope=root_scope)
 
     return None

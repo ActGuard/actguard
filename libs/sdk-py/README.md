@@ -21,9 +21,9 @@ uv add actguard
 | Skipped workflow steps | Performs side effect before required step | ✅ |
 | Obeying malicious input | Untrusted text tells it to do something destructive | ✅ |
 
-## Set a spending limit (`client.budget_guard`)
+## Set a runtime token limit (`client.budget_guard`)
 
-Stop spending as soon as a user's request crosses $0.05:
+Stop a run once it crosses 50,000 tokens:
 
 ```python
 from actguard import Client
@@ -33,7 +33,12 @@ from actguard.exceptions import (
     BudgetTransportError,
 )
 import openai
+```
 
+Import budget exceptions from `actguard.exceptions`; they are not all re-exported
+from the top-level `actguard` package.
+
+```python
 ag = Client(
     api_key="ag_live_agent_key",
     gateway_url="https://api.actguard.ai",
@@ -43,7 +48,7 @@ guard = None
 
 try:
     with ag.run(user_id="alice"):
-        with ag.budget_guard(usd_limit=0.05) as g:
+        with ag.budget_guard(token_limit=50_000) as g:
             guard = g
             response = oai.chat.completions.create(
                 model="gpt-4o",
@@ -58,25 +63,34 @@ except BudgetTransportError as e:
     print(f"Budget transport failed: {e}")
 finally:
     if guard is not None:
-        print(f"Spent ${guard.usd_used:.6f} using {guard.tokens_used} tokens")
+        print(f"Used {guard.tokens_used} tokens")
 ```
 
 Under the hood, `client.budget_guard(...)` reserves on enter (`POST /api/v1/reserve`)
 and settles on exit (`POST /api/v1/settle`) with your configured API key.
 Those hot-path budget calls default to `budget_timeout_s=3.0` and
-`budget_max_retries=1` so agents degrade open quickly if the gateway is
-unavailable. Background event delivery keeps its own retry budget via
-`event_timeout_s` and `event_max_retries`.
+`budget_max_retries=1`.
+Budget exhaustion is fail-closed:
 
-Set different USD limits for different scopes:
+- local `cost_limit` enforcement raises `BudgetExceededError`
+- remote budget exhaustion from reserve/settle raises `BudgetExceededError`
+- billing exhaustion from reserve/settle raises `ActGuardPaymentRequired`
+
+Ordinary transport degradation like timeouts, SSL failures, or 5xx responses
+still degrades open quickly so the agent can continue when the gateway is
+temporarily unavailable. Background event delivery keeps its own retry budget
+via `event_timeout_s` and `event_max_retries`.
+Local runtime blocking uses `token_limit`.
+
+Set different token limits for different scopes:
 
 ```python
 with ag.run(user_id="bob"):
-    with ag.budget_guard(usd_limit=0.02) as guard:
+    with ag.budget_guard(token_limit=20_000) as guard:
         ...
 
 with ag.run(user_id="carol"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         ...
 ```
 
@@ -84,7 +98,7 @@ You can also layer budget scope on a run scope:
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.05):
+    with ag.budget_guard(token_limit=50_000):
         ...
 ```
 
@@ -99,12 +113,12 @@ async def main():
     ag = Client.from_file("./actguard.json")
     oai = openai.AsyncOpenAI()
     async with ag.run(user_id="dave"):
-        async with ag.budget_guard(usd_limit=0.10) as guard:
+        async with ag.budget_guard(token_limit=100_000) as guard:
             response = await oai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Hello!"}],
             )
-    print(f"Used ${guard.usd_used:.4f}")
+    print(f"Used {guard.tokens_used} tokens")
 
 asyncio.run(main())
 ```
@@ -113,7 +127,7 @@ Streaming responses are fully supported — actguard wraps the iterator transpar
 
 ```python
 with ag.run(user_id="eve"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         stream = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Tell me a story."}],
@@ -123,7 +137,7 @@ with ag.run(user_id="eve"):
             if chunk.choices[0].delta.content:
                 print(chunk.choices[0].delta.content, end="", flush=True)
 
-print(f"\nUsed ${guard.usd_used:.4f}")
+print(f"\nUsed {guard.tokens_used} tokens")
 ```
 
 ## Rate-limit a tool

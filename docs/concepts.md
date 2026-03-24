@@ -5,7 +5,7 @@
 ActGuard has two distinct runtime scopes:
 
 - `client.run(...)` for run-scoped state such as `max_attempts`, `idempotent`, and runtime event attribution
-- `client.budget_guard(...)` for spend tracking and reserve/settle-backed budget enforcement inside an active run
+- `client.budget_guard(...)` for token tracking and reserve/settle-backed budget enforcement inside an active run
 
 Chain-of-custody uses a separate session scope:
 
@@ -38,7 +38,7 @@ If `max_attempts`, `idempotent`, or `budget_guard` runs without an active run sc
 
 ```python
 with client.run(user_id="alice"):
-    with client.budget_guard(name="root", usd_limit=0.10) as guard:
+    with client.budget_guard(name="root", token_limit=100_000) as guard:
         ...
 ```
 
@@ -50,12 +50,11 @@ transport. The defaults are `budget_timeout_s=3.0`, `budget_max_retries=1`,
 
 - provider/model attribution
 - input, cached-input, and output tokens
-- cumulative USD spend
 - reserve/settle state for the root scope
 
 ### Limits
 
-The current SDK enforces USD budgets. `BudgetExceededError.limit_type` is `"usd"`.
+The current SDK enforces token budgets. `BudgetExceededError.limit_type` is `"token"`.
 
 ### Root and nested scopes
 
@@ -63,9 +62,9 @@ Nested budget scopes share the same run-level reserve but keep local totals:
 
 ```python
 with client.run(user_id="alice"):
-    with client.budget_guard(name="root", usd_limit=0.10) as root:
+    with client.budget_guard(name="root", token_limit=100_000) as root:
         ...
-        with client.budget_guard(name="search", usd_limit=0.02) as nested:
+        with client.budget_guard(name="search", token_limit=20_000) as nested:
             ...
 ```
 
@@ -133,13 +132,12 @@ from actguard.exceptions import BudgetExceededError
 
 try:
     with client.run(user_id="alice"):
-        with client.budget_guard(usd_limit=0.01):
+        with client.budget_guard(token_limit=1_000):
             client_llm_call(...)
 except BudgetExceededError as e:
-    print(e.limit_type)  # "usd"
+    print(e.limit_type)  # "token"
     print(e.tokens_used)
-    print(e.usd_used)
-    print(e.usd_limit)
+    print(e.token_limit)
 ```
 
 Full details live in the [API reference](./api-reference.md).

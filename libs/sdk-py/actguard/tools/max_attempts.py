@@ -7,6 +7,16 @@ from ._observability import emit_guard_blocked
 
 
 def max_attempts(fn=None, *, calls: int):
+    """Block a tool after it has been called too many times in one run.
+
+    Use this when a tool should only run a fixed number of times inside a
+    single ``client.run(...)`` scope, such as retries, expensive lookups, or
+    external actions that should not loop indefinitely.
+
+    Args:
+        calls: Maximum number of allowed calls per run before
+            ``MaxAttemptsExceeded`` is raised.
+    """
     if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1:
         raise MaxAttemptsConfigurationError(
             f"max_attempts: calls must be an integer >= 1, got {calls!r}"

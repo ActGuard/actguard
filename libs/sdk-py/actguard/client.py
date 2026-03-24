@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional
 
 from actguard._config import ActGuardConfig
 from actguard._debug import ensure_actguard_debug_handler
+from actguard.costs import CuTariff
 from actguard.core.runtime import ClientRunContext
 from actguard.events.client import EventClient
 from actguard.integrations.manager import IntegrationBootstrap
@@ -114,6 +115,7 @@ class Client:
             self._event_client = None
         self._budget_transport = BudgetTransport(self._config)
         self._integration_bootstrap = IntegrationBootstrap()
+        self._cu_tariff_cache: Optional[CuTariff] = None
 
     @property
     def event_client(self) -> Optional[EventClient]:
@@ -135,17 +137,38 @@ class Client:
         *,
         user_id: Optional[str] = None,
         name: Optional[str] = None,
-        usd_limit: Optional[float] = None,
+        cost_limit: Optional[int] = None,
         run_id: Optional[str] = None,
         plan_key: Optional[str] = None,
     ):
+        """Create a budget scope inside an active ``client.run(...)`` block.
+
+        Use this when you want to attribute model/tool usage to a specific step
+        of a run, or when you want ActGuard to enforce a maximum budget for that
+        scope.
+
+        ``cost_limit`` is a simple integer cap in cost units (CU), where
+        ``1_000 CU`` is roughly equal to ``$1.00``. When usage recorded in the
+        scope exceeds that cap, ActGuard raises a budget error. Leave it unset
+        if you only want attribution without enforcing a limit.
+
+        Nested scopes are useful for labeling sub-steps such as ``search`` or
+        ``rerank``. Child scopes should usually use a smaller ``cost_limit`` than
+        their parent scope.
+
+        Example:
+            >>> client = actguard.Client.from_env()
+            >>> with client.run(run_id="req-42"):
+            ...     with client.budget_guard(name="search", cost_limit=1_000):
+            ...         call_model()
+        """
         from actguard.budget import BudgetGuard
 
         return BudgetGuard(
             client=self,
             user_id=user_id,
             name=name,
-            usd_limit=usd_limit,
+            cost_limit=cost_limit,
             run_id=run_id,
             plan_key=plan_key,
         )
@@ -153,21 +176,30 @@ class Client:
     def prepare_budget_scope(self) -> None:
         self._integration_bootstrap.ensure_patched()
 
+    def get_cu_tariff(self, *, force_refresh: bool = False) -> CuTariff:
+        if self._cu_tariff_cache is not None and not force_refresh:
+            return self._cu_tariff_cache
+
+        payload = self._budget_transport.get_public(path="/api/v1/cu-tariff")
+        tariff = CuTariff.from_payload(payload)
+        self._cu_tariff_cache = tariff
+        return tariff
+
     def reserve_budget(
         self,
         *,
         run_id: str,
-        usd_limit_micros: Optional[int],
+        cost_limit: Optional[int] = None,
         plan_key: Optional[str] = None,
         user_id: Optional[str] = None,
-    ) -> str:
+    ) -> Mapping[str, Any]:
         from actguard.exceptions import BudgetTransportError
 
         payload = {
             "run_id": run_id,
         }
-        if usd_limit_micros is not None:
-            payload["usd_limit_micros"] = usd_limit_micros
+        if cost_limit is not None:
+            payload["cost_limit"] = cost_limit
         if plan_key:
             payload["plan_key"] = plan_key
         if user_id:
@@ -178,27 +210,39 @@ class Client:
             raise BudgetTransportError(
                 "Reserve response missing required 'reserve_id'."
             )
-        return reserve_id
+        if not isinstance(response.get("status"), str):
+            return {"status": "reserved", **response}
+        return response
 
     def settle_budget(
         self,
         *,
         reserve_id: str,
-        provider: str,
-        provider_model_id: str,
         input_tokens: int,
         cached_input_tokens: int,
         output_tokens: int,
-    ) -> None:
-        payload = {
+        usage_breakdown: list[Mapping[str, object]],
+        cache_write_tokens_5m: Optional[int] = None,
+        cache_write_tokens_1h: Optional[int] = None,
+        web_search_count: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {
             "reserve_id": reserve_id,
-            "provider": provider,
-            "provider_model_id": provider_model_id,
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
             "output_tokens": output_tokens,
+            "usage_breakdown": [dict(entry) for entry in usage_breakdown],
         }
-        self._budget_transport.post(path="/api/v1/settle", payload=payload)
+        if cache_write_tokens_5m is not None:
+            payload["cache_write_tokens_5m"] = cache_write_tokens_5m
+        if cache_write_tokens_1h is not None:
+            payload["cache_write_tokens_1h"] = cache_write_tokens_1h
+        if web_search_count is not None:
+            payload["web_search_count"] = web_search_count
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        return self._budget_transport.post(path="/api/v1/settle", payload=payload)
 
     def close(self) -> None:
         if self._event_client is None:

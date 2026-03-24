@@ -31,11 +31,11 @@ model = genai.GenerativeModel("gemini-1.5-pro")
 ag = Client.from_env()
 
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         response = model.generate_content("Explain quantum computing.")
         print(response.text)
 
-print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
+print(f"{guard.tokens_used} tokens")
 ```
 
 ## Streaming
@@ -44,11 +44,11 @@ For streaming, actguard reads `usage_metadata` from the first chunk that carries
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         for chunk in model.generate_content("Write a poem.", stream=True):
             print(chunk.text, end="", flush=True)
 
-print(f"\n${guard.usd_used:.6f}")
+print(f"\n{guard.tokens_used} tokens")
 ```
 
 ## Async client
@@ -64,13 +64,13 @@ ag = Client.from_env()
 
 async def main():
     async with ag.run(user_id="alice"):
-        async with ag.budget_guard(usd_limit=0.10) as guard:
+        async with ag.budget_guard(token_limit=100_000) as guard:
             response = await model.generate_content_async("Hello!")
-    print(f"${guard.usd_used:.6f}")
+    print(f"{guard.tokens_used} tokens")
 
 asyncio.run(main())
 ```
 
 ## Model name normalisation
 
-The Google SDK prefixes model names with `models/` (e.g. `models/gemini-1.5-pro`). actguard strips this prefix before looking up the pricing table, so `gemini-1.5-pro` is the key used for cost calculation.
+The Google SDK prefixes model names with `models/` (e.g. `models/gemini-1.5-pro`). actguard strips this prefix before recording provider/model attribution, so `gemini-1.5-pro` is the normalized model id stored in runtime usage data.

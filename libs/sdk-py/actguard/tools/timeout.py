@@ -66,14 +66,17 @@ def _get_run_id() -> str | None:
 def timeout(seconds: float, executor: Executor | None = None):
     """Bound the wall-clock duration of a tool invocation.
 
-    Raises ToolTimeoutError if the tool does not complete within *seconds*.
-    Supports both sync and async functions. Generator functions are rejected
-    at decoration time.
+    Use this when a tool calls a dependency that can hang or when you need a
+    hard upper bound on how long one invocation may take.
+
+    Raises ``ToolTimeoutError`` if the tool does not complete within
+    ``seconds``. Supports both sync and async functions. Generator functions are
+    rejected at decoration time.
 
     Args:
         seconds: Maximum allowed wall-clock time in seconds.
         executor: Optional custom Executor for sync functions. Defaults to a
-                  module-level ThreadPoolExecutor.
+                 module-level ThreadPoolExecutor.
     """
 
     def decorator(fn):

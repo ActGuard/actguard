@@ -30,7 +30,7 @@ ag = Client.from_env()
 client = anthropic.Anthropic()
 
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         message = client.messages.create(
             model="claude-opus-4-6",
             max_tokens=1024,
@@ -38,7 +38,7 @@ with ag.run(user_id="alice"):
         )
         print(message.content[0].text)
 
-print(f"${guard.usd_used:.6f}  ({guard.tokens_used} tokens)")
+print(f"{guard.tokens_used} tokens")
 ```
 
 ## Streaming
@@ -47,7 +47,7 @@ actguard reads `message_start` (input tokens) and `message_delta` (output tokens
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(usd_limit=0.10) as guard:
+    with ag.budget_guard(token_limit=100_000) as guard:
         with client.messages.create(
             model="claude-opus-4-6",
             max_tokens=1024,
@@ -58,7 +58,7 @@ with ag.run(user_id="alice"):
                 if hasattr(event, "delta") and hasattr(event.delta, "text"):
                     print(event.delta.text, end="", flush=True)
 
-print(f"\n${guard.usd_used:.6f}")
+print(f"\n{guard.tokens_used} tokens")
 ```
 
 ## Async client
@@ -73,13 +73,13 @@ client = anthropic.AsyncAnthropic()
 
 async def main():
     async with ag.run(user_id="alice"):
-        async with ag.budget_guard(usd_limit=0.10) as guard:
+        async with ag.budget_guard(token_limit=100_000) as guard:
             message = await client.messages.create(
                 model="claude-opus-4-6",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": "Hello!"}],
             )
-    print(f"${guard.usd_used:.6f}")
+    print(f"{guard.tokens_used} tokens")
 
 asyncio.run(main())
 ```

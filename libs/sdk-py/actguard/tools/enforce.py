@@ -9,7 +9,11 @@ from actguard.tools.rules import Rule
 
 
 def enforce(rules: List[Rule]):
-    """Decorator that checks chain-of-custody rules before a tool executes.
+    """Check chain-of-custody rules before a tool executes.
+
+    Use this on sensitive tools when calls should be allowed only if the current
+    ``actguard.session(...)`` already contains required facts or the inputs pass
+    policy checks.
 
     Args:
         rules: List of Rule instances (RequireFact, Threshold, BlockRegex, etc.)

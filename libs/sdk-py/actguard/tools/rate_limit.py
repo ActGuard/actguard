@@ -16,7 +16,11 @@ def rate_limit(
     period: float = 60.0,
     scope: Optional[str] = None,
 ):
-    """Sliding-window rate limit decorator (sync + async).
+    """Apply a sliding-window call limit to a tool.
+
+    Use this when a tool should only be callable a certain number of times over
+    a time window, either globally or partitioned by a function argument such as
+    ``user_id``.
 
     Args:
         max_calls: Maximum number of calls allowed within the period.

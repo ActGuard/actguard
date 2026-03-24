@@ -13,7 +13,7 @@ from actguard.core.budget_context import (
 from actguard.core.budget_recorder import get_current_budget_recorder
 from actguard.exceptions import BudgetExceededError
 from actguard.integrations.usage import extract_usage_info
-from actguard.reporting import emit_usage_event
+from actguard.reporting import emit_provider_usage_event
 
 logger = logging.getLogger("actguard.integrations.openai")
 
@@ -59,7 +59,7 @@ def _record_usage(
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
         )
-    emit_usage_event(
+    emit_provider_usage_event(
         provider="openai",
         model=model,
         input_tokens=input_tokens,
@@ -74,14 +74,14 @@ def _check_limits(state) -> None:
         recorder.check_limits()
         return
     if get_budget_state() is None:
-        if state.usd_limit is not None and state.usd_used >= state.usd_limit:
+        if state.cost_limit is not None and state.cost_used >= state.cost_limit:
             emit_budget_blocked(state)
             raise BudgetExceededError(
                 user_id=state.user_id,
                 tokens_used=state.tokens_used,
-                usd_used=state.usd_used,
-                usd_limit=state.usd_limit,
-                limit_type="usd",
+                cost_used=state.cost_used,
+                cost_limit=state.cost_limit,
+                limit_type="cost",
                 scope_id=state.scope_id,
                 scope_name=state.scope_name,
                 scope_kind=state.scope_kind,
@@ -96,9 +96,9 @@ def _check_limits(state) -> None:
         raise BudgetExceededError(
             user_id=blocked_scope.user_id,
             tokens_used=blocked_scope.tokens_used,
-            usd_used=blocked_scope.usd_used,
-            usd_limit=blocked_scope.usd_limit,
-            limit_type="usd",
+            cost_used=blocked_scope.cost_used,
+            cost_limit=blocked_scope.cost_limit,
+            limit_type="cost",
             scope_id=blocked_scope.scope_id,
             scope_name=blocked_scope.scope_name,
             scope_kind=blocked_scope.scope_kind,
