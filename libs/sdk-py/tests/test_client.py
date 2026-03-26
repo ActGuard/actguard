@@ -518,7 +518,22 @@ def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
             402,
             "Payment Required",
             hdrs=None,
-            fp=io.BytesIO(b'{"error":"payment_required"}'),
+            fp=io.BytesIO(
+                json.dumps(
+                    {
+                        "Message": (
+                            "Insufficient prepaid balance for this billing "
+                            "identity."
+                        ),
+                        "CurrentBalance": 0,
+                        "RequiredAmount": 500000,
+                        "Shortfall": 500000,
+                        "TopupURL": "https://checkout.stripe.com/c/pay/cs_test_123",
+                        "TopupSessionID": "0ed9f407-17c5-47c8-9e3c-7fb098059421",
+                        "UserID": "igor-test-stripe-top-up",
+                    }
+                ).encode()
+            ),
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -531,6 +546,40 @@ def test_reserve_budget_402_raises_payment_required_without_retry(monkeypatch):
     assert sleeps == []
     assert excinfo.value.path == "/api/v1/reserve"
     assert excinfo.value.status == 402
+    assert excinfo.value.user_message == (
+        "Insufficient prepaid balance for this billing identity."
+    )
+    assert excinfo.value.current_balance == 0
+    assert excinfo.value.required_amount == 500000
+    assert excinfo.value.shortfall == 500000
+    assert excinfo.value.topup_url == "https://checkout.stripe.com/c/pay/cs_test_123"
+    assert excinfo.value.topup_session_id == "0ed9f407-17c5-47c8-9e3c-7fb098059421"
+    assert excinfo.value.user_id == "igor-test-stripe-top-up"
+    assert excinfo.value.payload() == {
+        "path": "/api/v1/reserve",
+        "status": 402,
+        "user_message": "Insufficient prepaid balance for this billing identity.",
+        "current_balance": 0,
+        "required_amount": 500000,
+        "shortfall": 500000,
+        "topup_url": "https://checkout.stripe.com/c/pay/cs_test_123",
+        "topup_session_id": "0ed9f407-17c5-47c8-9e3c-7fb098059421",
+        "user_id": "igor-test-stripe-top-up",
+        "response_payload": {
+            "Message": "Insufficient prepaid balance for this billing identity.",
+            "CurrentBalance": 0,
+            "RequiredAmount": 500000,
+            "Shortfall": 500000,
+            "TopupURL": "https://checkout.stripe.com/c/pay/cs_test_123",
+            "TopupSessionID": "0ed9f407-17c5-47c8-9e3c-7fb098059421",
+            "UserID": "igor-test-stripe-top-up",
+        },
+    }
+    assert (
+        str(excinfo.value)
+        == "Budget API request failed with status 402 at /api/v1/reserve: "
+        "Insufficient prepaid balance for this billing identity."
+    )
     assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
     assert excinfo.value.__cause__.code == 402
 
@@ -578,8 +627,48 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     assert sleeps == []
     assert excinfo.value.path == "/api/v1/settle"
     assert excinfo.value.status == 402
+    assert excinfo.value.user_message == "payment_required"
+    assert excinfo.value.current_balance is None
+    assert excinfo.value.required_amount is None
+    assert excinfo.value.shortfall is None
+    assert excinfo.value.topup_url is None
+    assert excinfo.value.topup_session_id is None
+    assert excinfo.value.user_id is None
+    assert excinfo.value.response_payload == {"error": "payment_required"}
     assert isinstance(excinfo.value.__cause__, urllib.error.HTTPError)
     assert excinfo.value.__cause__.code == 402
+
+
+def test_reserve_budget_402_partial_payment_payload_is_exposed_safely(monkeypatch):
+    client = actguard.Client(
+        gateway_url="https://gw.example",
+        api_key="sk-test",
+        budget_max_retries=8,
+    )
+
+    def fake_urlopen(request, timeout, context=None):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            402,
+            "Payment Required",
+            hdrs=None,
+            fp=io.BytesIO(
+                b'{"message":"Top up your balance.","TopupURL":"https://pay.example/x"}'
+            ),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ActGuardPaymentRequired) as excinfo:
+        client.reserve_budget(run_id="run-1", cost_limit=500)
+
+    assert excinfo.value.user_message == "Top up your balance."
+    assert excinfo.value.topup_url == "https://pay.example/x"
+    assert excinfo.value.current_balance is None
+    assert excinfo.value.required_amount is None
+    assert excinfo.value.shortfall is None
+    assert excinfo.value.topup_session_id is None
+    assert excinfo.value.user_id is None
 
 
 def test_reserve_budget_409_raises_budget_exceeded_without_retry(monkeypatch):

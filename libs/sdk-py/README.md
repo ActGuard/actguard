@@ -58,13 +58,19 @@ try:
 except BudgetExceededError as e:
     print(f"Budget hit: {e}")
 except ActGuardPaymentRequired as e:
-    print(f"Billing rejected reserve/settle: {e}")
+    print(e.user_message or str(e))
+    if e.topup_url:
+        print(f"Top up here: {e.topup_url}")
 except BudgetTransportError as e:
     print(f"Budget transport failed: {e}")
 finally:
     if guard is not None:
         print(f"Used {guard.tokens_used} tokens")
 ```
+
+`ActGuardPaymentRequired` exposes structured billing fields when the gateway
+returns them, including `user_message`, `current_balance`, `required_amount`,
+`shortfall`, `topup_url`, `topup_session_id`, and `user_id`.
 
 Under the hood, `client.budget_guard(...)` reserves on enter (`POST /api/v1/reserve`)
 and settles on exit (`POST /api/v1/settle`) with your configured API key.

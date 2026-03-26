@@ -103,18 +103,61 @@ class ActGuardPaymentRequired(ActGuardRuntimeError):
         *,
         path: str,
         status: int = 402,
+        user_message: str | None = None,
+        current_balance: int | None = None,
+        required_amount: int | None = None,
+        shortfall: int | None = None,
+        topup_url: str | None = None,
+        topup_session_id: str | None = None,
+        user_id: str | None = None,
+        response_payload: dict[str, Any] | None = None,
         cause: BaseException | None = None,
     ) -> None:
         self.path = path
         self.status = status
+        self.user_message = user_message
+        self.current_balance = current_balance
+        self.required_amount = required_amount
+        self.shortfall = shortfall
+        self.topup_url = topup_url
+        self.topup_session_id = topup_session_id
+        self.user_id = user_id
+        self.response_payload = (
+            dict(response_payload) if response_payload is not None else None
+        )
+
+        detail_message = (
+            user_message.strip()
+            if isinstance(user_message, str) and user_message.strip()
+            else "payment required."
+        )
+        message = (
+            f"Budget API request failed with status {status} at {path}: "
+            f"{detail_message}"
+        )
+        details: dict[str, Any] = {"path": path, "status": status}
+        if self.user_message is not None:
+            details["user_message"] = self.user_message
+        if self.current_balance is not None:
+            details["current_balance"] = self.current_balance
+        if self.required_amount is not None:
+            details["required_amount"] = self.required_amount
+        if self.shortfall is not None:
+            details["shortfall"] = self.shortfall
+        if self.topup_url is not None:
+            details["topup_url"] = self.topup_url
+        if self.topup_session_id is not None:
+            details["topup_session_id"] = self.topup_session_id
+        if self.user_id is not None:
+            details["user_id"] = self.user_id
+        if self.response_payload is not None:
+            details["response_payload"] = dict(self.response_payload)
+
         super().__init__(
-            (
-                f"Budget API request failed with status {status} at {path}: "
-                "payment required."
-            ),
+            message,
             code=self.code,
             reason=self.reason,
-            details={"path": path, "status": status},
+            details=details,
             cause=cause,
             retryable=False,
             status_code=status,

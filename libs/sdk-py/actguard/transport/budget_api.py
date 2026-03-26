@@ -42,7 +42,6 @@ class BudgetTransport:
         require_auth: bool,
     ) -> Mapping[str, Any]:
         from actguard.exceptions import (
-            ActGuardPaymentRequired,
             BudgetTransportError,
         )
 
@@ -97,8 +96,10 @@ class BudgetTransport:
                     trace.log_failure(exc=exc)
                 status = exc.code
                 if status == 402:
-                    raise ActGuardPaymentRequired(
-                        path=path, status=status, cause=exc
+                    raise _payment_required_error(
+                        path=path,
+                        status=status,
+                        exc=exc,
                     ) from exc
                 if status == 409:
                     raise _budget_limit_exceeded_error(
@@ -207,6 +208,44 @@ def _budget_limit_exceeded_error(
     return error
 
 
+def _payment_required_error(
+    *,
+    path: str,
+    status: int,
+    exc: urllib.error.HTTPError,
+):
+    from actguard.exceptions import ActGuardPaymentRequired
+
+    parsed = _http_error_payload(exc)
+    payload = parsed if isinstance(parsed, dict) else None
+    detail = _http_error_detail_from_payload(parsed)
+
+    return ActGuardPaymentRequired(
+        path=path,
+        status=status,
+        user_message=_first_http_error_string(
+            payload,
+            "Message",
+            "message",
+            "detail",
+            "error",
+        )
+        or detail,
+        current_balance=_http_error_int(payload, "CurrentBalance", "current_balance"),
+        required_amount=_http_error_int(
+            payload, "RequiredAmount", "required_amount"
+        ),
+        shortfall=_http_error_int(payload, "Shortfall", "shortfall"),
+        topup_url=_http_error_string(payload, "TopupURL", "topup_url"),
+        topup_session_id=_http_error_string(
+            payload, "TopupSessionID", "topup_session_id"
+        ),
+        user_id=_http_error_string(payload, "UserID", "user_id"),
+        response_payload=payload,
+        cause=exc,
+    )
+
+
 def _http_error_detail(exc: urllib.error.HTTPError) -> str | None:
     return _http_error_detail_from_payload(_http_error_payload(exc))
 
@@ -251,4 +290,39 @@ def _http_error_detail_from_payload(payload: object | None) -> str | None:
     if isinstance(payload, str):
         stripped = " ".join(payload.strip().split())
         return stripped or None
+    return None
+
+
+def _http_error_string(
+    payload: Mapping[str, Any] | None,
+    *keys: str,
+) -> str | None:
+    if payload is None:
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _first_http_error_string(
+    payload: Mapping[str, Any] | None,
+    *keys: str,
+) -> str | None:
+    return _http_error_string(payload, *keys)
+
+
+def _http_error_int(
+    payload: Mapping[str, Any] | None,
+    *keys: str,
+) -> int | None:
+    if payload is None:
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
     return None
