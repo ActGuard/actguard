@@ -103,6 +103,8 @@ class SharedBudgetState:
             self.tokens_used += input_tokens + output_tokens
             if self.tariff is not None:
                 self.cost_used += self.tariff.llm_cost(
+                    provider=provider,
+                    provider_model_id=provider_model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
@@ -190,6 +192,8 @@ class BudgetState:
                 tariff = self.shared_root.tariff
             if tariff is not None:
                 self.cost_used += tariff.llm_cost(
+                    provider=provider,
+                    provider_model_id=provider_model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
@@ -487,7 +491,10 @@ def blocked_scope_metadata(blocked_scope: BudgetState) -> dict:
     payload["cost_limit"] = blocked_scope.cost_limit
     if blocked_scope.tariff_version:
         payload["tariff_version"] = blocked_scope.tariff_version
-    elif blocked_scope.shared_root is not None and blocked_scope.shared_root.tariff_version:
+    elif (
+        blocked_scope.shared_root is not None
+        and blocked_scope.shared_root.tariff_version
+    ):
         payload["tariff_version"] = blocked_scope.shared_root.tariff_version
     return payload
 

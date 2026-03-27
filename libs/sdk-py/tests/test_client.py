@@ -9,7 +9,11 @@ import pytest
 
 import actguard
 from actguard.client import DEFAULT_GATEWAY_URL
-from actguard.core.budget_context import get_budget_state, record_usage
+from actguard.core.budget_context import (
+    check_budget_limits,
+    get_budget_state,
+    record_usage,
+)
 from actguard.core.run_context import get_run_state
 from actguard.core.state import get_current_state
 from actguard.costs import CuTariff
@@ -56,6 +60,7 @@ def test_client_from_file_creates_usable_client(tmp_path):
             {
                 "gateway_url": "https://api.actguard.io",
                 "api_key": "sk-test",
+                "event_mode": "off",
             }
         )
     )
@@ -71,6 +76,110 @@ def test_client_from_file_creates_usable_client(tmp_path):
         assert state.client is client
         assert state.user_id == "alice"
         assert state.run_id == "run-1"
+    client.close()
+
+
+def test_cu_tariff_keeps_legacy_default_cost_behavior():
+    tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-test",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-test",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                }
+            },
+            "tools": {"tavily_search": 10},
+        }
+    )
+
+    assert (
+        tariff.llm_cost(
+            provider="openai",
+            provider_model_id="gpt-4o-mini",
+            input_tokens=1_000,
+            output_tokens=250,
+            cached_input_tokens=100,
+        )
+        == 3
+    )
+    assert tariff.tool_cost("tavily_search") == 10
+
+
+def test_cu_tariff_uses_provider_model_input_per_1m_override():
+    tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-test",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-test",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                },
+                "providers": {
+                    "openai": {
+                        "models": {
+                            "text-embedding-3-small": {"input_cu_per_1m": 20},
+                        }
+                    }
+                },
+            },
+            "tools": {},
+        }
+    )
+
+    assert (
+        tariff.llm_cost(
+            provider="openai",
+            provider_model_id="text-embedding-3-small",
+            input_tokens=1_000_000,
+            output_tokens=0,
+        )
+        == 20
+    )
+    assert (
+        tariff.llm_cost(
+            provider="openai",
+            provider_model_id="gpt-4o-mini",
+            input_tokens=1_000_000,
+            output_tokens=0,
+        )
+        == 1_000
+    )
+
+
+def test_cu_tariff_rejects_ambiguous_input_rate_override():
+    with pytest.raises(ValueError, match="cannot define both"):
+        CuTariff.from_payload(
+            {
+                "tariff_version": "v1-test",
+                "cu_per_usd": 1000,
+                "registry_version": "registry-test",
+                "llm": {
+                    "default": {
+                        "input_cu_per_1k": 1,
+                        "output_cu_per_1k": 4,
+                        "cached_cu_per_1k": 1,
+                    },
+                    "providers": {
+                        "openai": {
+                            "models": {
+                                "text-embedding-3-small": {
+                                    "input_cu_per_1k": 1,
+                                    "input_cu_per_1m": 20,
+                                }
+                            }
+                        }
+                    },
+                },
+                "tools": {},
+            }
+        )
 
 
 def test_client_run_without_user_id_is_supported():
@@ -119,6 +228,100 @@ def test_sequential_runs_restore_context_correctly():
     with client.run(run_id="second"):
         assert get_run_state() is not None
         assert get_run_state().run_id == "second"
+
+
+def test_budget_guard_embedding_override_keeps_large_input_under_limit(monkeypatch):
+    embedding_tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-embedding",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-embedding",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                },
+                "providers": {
+                    "openai": {
+                        "models": {
+                            "text-embedding-3-small": {"input_cu_per_1m": 20},
+                        }
+                    }
+                },
+            },
+            "tools": {},
+        }
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "get_cu_tariff",
+        lambda self, force_refresh=False: embedding_tariff,
+    )
+
+    client = actguard.Client()
+    monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-embedding")
+    monkeypatch.setattr(client, "settle_budget", lambda **_: None)
+
+    with client.run(run_id="run-embedding-budget", user_id="alice"):
+        with client.budget_guard(name="embed", cost_limit=500):
+            record_usage(
+                provider="openai",
+                provider_model_id="text-embedding-3-small",
+                input_tokens=1_000_000,
+                output_tokens=0,
+            )
+            budget_state = get_budget_state()
+            assert budget_state is not None
+            assert budget_state.cost_used == 20
+            assert check_budget_limits() is None
+
+
+def test_budget_guard_manual_voyage_override_applies_to_recorded_usage(monkeypatch):
+    voyage_tariff = CuTariff.from_payload(
+        {
+            "tariff_version": "v1-voyage",
+            "cu_per_usd": 1000,
+            "registry_version": "registry-voyage",
+            "llm": {
+                "default": {
+                    "input_cu_per_1k": 1,
+                    "output_cu_per_1k": 4,
+                    "cached_cu_per_1k": 1,
+                },
+                "providers": {
+                    "voyage": {
+                        "models": {
+                            "voyage-3.5-lite": {"input_cu_per_1m": 20},
+                        }
+                    }
+                },
+            },
+            "tools": {},
+        }
+    )
+    monkeypatch.setattr(
+        actguard.Client,
+        "get_cu_tariff",
+        lambda self, force_refresh=False: voyage_tariff,
+    )
+
+    client = actguard.Client()
+    monkeypatch.setattr(client, "reserve_budget", lambda **_: "res-voyage")
+    monkeypatch.setattr(client, "settle_budget", lambda **_: None)
+
+    with client.run(run_id="run-voyage-budget", user_id="alice"):
+        with client.budget_guard(name="embed", cost_limit=500):
+            record_usage(
+                provider="voyage",
+                provider_model_id="voyage-3.5-lite",
+                input_tokens=1_000_000,
+                output_tokens=0,
+            )
+            budget_state = get_budget_state()
+            assert budget_state is not None
+            assert budget_state.cost_used == 20
+            assert check_budget_limits() is None
 
     assert get_run_state() is None
 
@@ -588,6 +791,7 @@ def test_settle_budget_402_raises_payment_required_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_max_retries=8,
     )
     attempts = {"count": 0}
@@ -643,6 +847,7 @@ def test_reserve_budget_402_partial_payment_payload_is_exposed_safely(monkeypatc
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_max_retries=8,
     )
 
@@ -675,6 +880,7 @@ def test_reserve_budget_409_raises_budget_exceeded_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_max_retries=8,
     )
     attempts = {"count": 0}
@@ -716,6 +922,7 @@ def test_reserve_budget_401_remains_budget_transport_error(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_max_retries=8,
     )
     attempts = {"count": 0}
@@ -746,6 +953,7 @@ def test_settle_budget_409_raises_budget_exceeded_without_retry(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_max_retries=8,
     )
     attempts = {"count": 0}
@@ -801,6 +1009,7 @@ def test_reserve_budget_500_retries_before_budget_transport_error(monkeypatch):
     client = actguard.Client(
         gateway_url="https://gw.example",
         api_key="sk-test",
+        event_mode="off",
         budget_timeout_s=10.0,
         budget_max_retries=2,
     )

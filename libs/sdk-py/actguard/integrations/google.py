@@ -184,8 +184,16 @@ def _extract_path(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     return first_str
 
 
-def _is_generate_path(path: str) -> bool:
-    return ":generateContent" in path or ":streamGenerateContent" in path
+def _is_supported_path(path: str) -> bool:
+    return any(
+        marker in path
+        for marker in (
+            ":generateContent",
+            ":streamGenerateContent",
+            ":embedContent",
+            ":batchEmbedContents",
+        )
+    )
 
 
 def _model_from_path(path: str) -> str:
@@ -328,7 +336,7 @@ def patch_google() -> None:
         path = _extract_path(args, kwargs)
 
         no_budget = state is None and get_current_budget_recorder() is None
-        if no_budget or not _is_generate_path(path):
+        if no_budget or not _is_supported_path(path):
             return _orig_request(self, *args, **kwargs)
 
         _check_limits(state)
@@ -351,7 +359,7 @@ def patch_google() -> None:
         path = _extract_path(args, kwargs)
 
         no_budget = state is None and get_current_budget_recorder() is None
-        if no_budget or not _is_generate_path(path):
+        if no_budget or not _is_supported_path(path):
             return _orig_request_streamed(self, *args, **kwargs)
 
         _check_limits(state)
@@ -365,7 +373,7 @@ def patch_google() -> None:
         path = _extract_path(args, kwargs)
 
         no_budget = state is None and get_current_budget_recorder() is None
-        if no_budget or not _is_generate_path(path):
+        if no_budget or not _is_supported_path(path):
             return await _orig_async_request(self, *args, **kwargs)
 
         _check_limits(state)
@@ -388,7 +396,7 @@ def patch_google() -> None:
         path = _extract_path(args, kwargs)
 
         no_budget = state is None and get_current_budget_recorder() is None
-        if no_budget or not _is_generate_path(path):
+        if no_budget or not _is_supported_path(path):
             return await _orig_async_request_streamed(self, *args, **kwargs)
 
         _check_limits(state)

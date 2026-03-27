@@ -650,6 +650,50 @@ class TestOpenAIHelpers:
 # ---------------------------------------------------------------------------
 
 class TestOpenAIIntegration:
+    def test_sync_embeddings_record_override_cost(self, openai_mocks, monkeypatch):
+        import openai
+
+        sync_mock, _ = openai_mocks
+        sync_mock.return_value = SimpleNamespace(
+            data=[SimpleNamespace(embedding=[0.1, 0.2])],
+            model="text-embedding-3-small",
+            usage=SimpleNamespace(prompt_tokens=1_000_000, total_tokens=1_000_000),
+        )
+        tariff = CuTariff.from_payload(
+            {
+                "tariff_version": "v1-embedding",
+                "cu_per_usd": 1000,
+                "registry_version": "registry-embedding",
+                "llm": {
+                    "default": {
+                        "input_cu_per_1k": 1,
+                        "output_cu_per_1k": 4,
+                        "cached_cu_per_1k": 1,
+                    },
+                    "providers": {
+                        "openai": {
+                            "models": {
+                                "text-embedding-3-small": {"input_cu_per_1m": 20},
+                            }
+                        }
+                    },
+                },
+                "tools": {},
+            }
+        )
+        monkeypatch.setattr(
+            actguard.Client,
+            "get_cu_tariff",
+            lambda self, force_refresh=False: tariff,
+        )
+
+        client = openai.OpenAI(api_key="sk-test")
+        with _with_runtime_budget_guard(user_id="u1", cost_limit=500) as guard:
+            client.embeddings.create(model="text-embedding-3-small", input=["hello"])
+
+        assert guard.tokens_used == 1_000_000
+        assert guard.cost_used == 20
+
     def test_sync_non_streaming_records_usage(self, openai_mocks):
         import openai
         sync_mock, _ = openai_mocks
@@ -941,6 +985,55 @@ def google_genai_stubs(monkeypatch):
 
 
 class TestGoogleGenAIPatch:
+    def test_sync_embedding_endpoint_records_usage(self, google_genai_stubs):
+        from actguard.core.state import BudgetState
+
+        BaseApiClient, google_mod = google_genai_stubs
+        google_mod.patch_google()
+
+        client = BaseApiClient()
+        client.sync_result = SimpleNamespace(
+            body=json.dumps({"usageMetadata": {"promptTokenCount": 1_000_000}}),
+            headers={},
+        )
+        tariff = CuTariff.from_payload(
+            {
+                "tariff_version": "v1-embedding",
+                "cu_per_usd": 1000,
+                "registry_version": "registry-embedding",
+                "llm": {
+                    "default": {
+                        "input_cu_per_1k": 1,
+                        "output_cu_per_1k": 4,
+                        "cached_cu_per_1k": 1,
+                    },
+                    "providers": {
+                        "google": {
+                            "models": {
+                                "gemini-embedding-001": {"input_cu_per_1m": 150},
+                            }
+                        }
+                    },
+                },
+                "tools": {},
+            }
+        )
+
+        state = BudgetState(
+            user_id="u1",
+            cost_limit=None,
+            usd_limit=None,
+            tariff=tariff,
+            tariff_version=tariff.tariff_version,
+        )
+        with _with_runtime_budget_state(state):
+            client.request("post", "/v1beta/models/gemini-embedding-001:embedContent", {})
+
+        assert state.provider == "google"
+        assert state.provider_model_id == "gemini-embedding-001"
+        assert state.tokens_used == 1_000_000
+        assert state.cost_used == 150
+
     def test_sync_non_streaming_records_usage(self, google_genai_stubs):
         from actguard.core.state import BudgetState
 
@@ -1130,6 +1223,13 @@ class TestGoogleGenAIPatch:
         _, google_mod = google_genai_stubs
         model = google_mod._model_from_path("gemini-2.0-flash:generateContent")
         assert model == "gemini-2.0-flash"
+
+    def test_model_extraction_from_embedding_path(self, google_genai_stubs):
+        _, google_mod = google_genai_stubs
+        model = google_mod._model_from_path(
+            "/v1beta/models/gemini-embedding-001:embedContent"
+        )
+        assert model == "gemini-embedding-001"
 
 
 # ---------------------------------------------------------------------------
