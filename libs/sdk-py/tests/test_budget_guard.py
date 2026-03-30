@@ -1322,3 +1322,101 @@ class TestThreadFallback:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             result = pool.submit(worker).result()
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# add_cost tests
+# ---------------------------------------------------------------------------
+
+class TestAddCost:
+    def test_add_cost_basic(self):
+        """add_cost records custom cost in CU and appears in usage_breakdown."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-add-cost"):
+            with client.budget_guard(name="root", cost_limit=5_000) as guard:
+                add_cost(name="tavily_search", usd=0.05)
+
+                assert guard.cost_used == 50  # 0.05 * 1000 cu_per_usd
+                breakdown = guard._shared_root.usage_breakdown_payload()
+                assert len(breakdown) == 1
+                entry = breakdown[0]
+                assert entry["type"] == "custom_cost"
+                assert entry["name"] == "tavily_search"
+                assert entry["cost_cu"] == 50
+                assert entry["scope_name"] == "root"
+
+    def test_add_cost_nested_scopes(self):
+        """add_cost propagates to all scopes in the stack and shared_root."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-add-cost-nested"):
+            with client.budget_guard(name="root", cost_limit=5_000) as root_guard:
+                with client.budget_guard(name="child", cost_limit=2_000) as child_guard:
+                    add_cost(name="db_query", usd=0.01)
+
+                    assert child_guard.local_cost_used == 10
+                    assert root_guard.root_cost_used == 10
+
+    def test_add_cost_mixed_with_llm(self):
+        """add_cost entries appear alongside LLM entries in usage_breakdown."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-mixed"):
+            with client.budget_guard(name="root", cost_limit=5_000) as guard:
+                record_usage(
+                    provider="openai",
+                    provider_model_id="gpt-4o-mini",
+                    input_tokens=100,
+                    output_tokens=50,
+                )
+                add_cost(name="tavily", usd=0.02)
+
+                breakdown = guard._shared_root.usage_breakdown_payload()
+                assert len(breakdown) == 2
+                assert "provider" in breakdown[0]  # LLM entry
+                assert breakdown[1]["type"] == "custom_cost"  # custom entry
+
+    def test_add_cost_negative_usd_raises(self):
+        """Negative usd raises ValueError."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-neg"):
+            with client.budget_guard(name="root", cost_limit=5_000):
+                with pytest.raises(ValueError, match="non-negative"):
+                    add_cost(name="bad", usd=-0.01)
+
+    def test_add_cost_zero_usd(self):
+        """usd=0 is valid and adds a 0 CU entry."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-zero"):
+            with client.budget_guard(name="root", cost_limit=5_000) as guard:
+                add_cost(name="free_api", usd=0.0)
+
+                assert guard.cost_used == 0
+                breakdown = guard._shared_root.usage_breakdown_payload()
+                assert len(breakdown) == 1
+                assert breakdown[0]["cost_cu"] == 0
+
+    def test_add_cost_budget_limit_enforcement(self):
+        """Custom costs count toward budget limits."""
+        from actguard.core.budget_context import add_cost
+
+        client = actguard.Client()
+        with client.run(user_id="alice", run_id="run-limit"):
+            with client.budget_guard(name="root", cost_limit=50):
+                add_cost(name="expensive_api", usd=0.06)  # 60 CU > 50 limit
+
+                violation = check_budget_limits()
+                assert violation is not None
+
+    def test_add_cost_importable_from_actguard(self):
+        """add_cost is accessible as actguard.add_cost."""
+        assert hasattr(actguard, "add_cost")
+        assert callable(actguard.add_cost)

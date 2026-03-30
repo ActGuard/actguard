@@ -32,8 +32,19 @@ class UsageBreakdownEntry:
     cached_input_tokens: int
     output_tokens: int
     scope_name: Optional[str] = None
+    custom_cost_name: Optional[str] = None
+    custom_cost_cu: Optional[int] = None
 
     def as_payload(self) -> dict:
+        if self.custom_cost_cu is not None:
+            payload: dict = {
+                "type": "custom_cost",
+                "name": self.custom_cost_name or "",
+                "cost_cu": self.custom_cost_cu,
+            }
+            if self.scope_name:
+                payload["scope_name"] = self.scope_name
+            return payload
         payload = {
             "provider": self.provider,
             "provider_model_id": self.provider_model_id,
@@ -120,6 +131,28 @@ class SharedBudgetState:
                 )
             )
 
+    def record_custom_cost(
+        self,
+        *,
+        name: str,
+        cost_cu: int,
+        scope_name: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            self.cost_used += cost_cu
+            self.usage_breakdown.append(
+                UsageBreakdownEntry(
+                    provider="custom",
+                    provider_model_id="",
+                    input_tokens=0,
+                    cached_input_tokens=0,
+                    output_tokens=0,
+                    scope_name=scope_name,
+                    custom_cost_name=name,
+                    custom_cost_cu=cost_cu,
+                )
+            )
+
     def usage_breakdown_payload(self) -> list[dict]:
         with self._lock:
             return [entry.as_payload() for entry in self.usage_breakdown]
@@ -198,6 +231,15 @@ class BudgetState:
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
                 )
+
+    def record_custom_cost(
+        self,
+        *,
+        name: str,
+        cost_cu: int,
+    ) -> None:
+        with self._lock:
+            self.cost_used += cost_cu
 
     def scope_metadata(self) -> dict:
         metadata = {
@@ -570,6 +612,66 @@ def record_usage(
         output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
     )
+
+
+def add_cost(
+    *,
+    name: str,
+    usd: float,
+) -> None:
+    """Record an arbitrary external cost (e.g., API call, database query).
+
+    Must be called inside an active ``budget_guard`` context.
+    The USD amount is converted to CU using the active tariff's ``cu_per_usd``.
+    """
+    if usd < 0:
+        raise ValueError("add_cost usd must be non-negative.")
+
+    context = _ensure_execution_context()
+    active_scope = context.active_scope() if context is not None else None
+    if context is None or active_scope is None:
+        source = _sole_active_budget_context()
+        if source is not None and source.active_scope() is not None:
+            context = source
+            active_scope = source.active_scope()
+
+    if context is not None and active_scope is not None:
+        shared_root = context.shared_root
+        cu_per_usd = shared_root.cu_per_usd
+        if not cu_per_usd or cu_per_usd <= 0:
+            raise ValueError(
+                "add_cost requires a loaded tariff with cu_per_usd. "
+                "Ensure cost_limit is set on budget_guard."
+            )
+        cost_cu = round(usd * cu_per_usd)
+        shared_root.record_custom_cost(
+            name=name,
+            cost_cu=cost_cu,
+            scope_name=active_scope.scope_name,
+        )
+        for scope in context.scope_stack:
+            scope.record_custom_cost(name=name, cost_cu=cost_cu)
+        return
+
+    state = require_budget_state()
+    shared_root = state.shared_root
+    if shared_root is None:
+        raise ValueError(
+            "add_cost requires an active budget guard with a tariff."
+        )
+    cu_per_usd = shared_root.cu_per_usd
+    if not cu_per_usd or cu_per_usd <= 0:
+        raise ValueError(
+            "add_cost requires a loaded tariff with cu_per_usd. "
+            "Ensure cost_limit is set on budget_guard."
+        )
+    cost_cu = round(usd * cu_per_usd)
+    shared_root.record_custom_cost(
+        name=name,
+        cost_cu=cost_cu,
+        scope_name=state.scope_name,
+    )
+    state.record_custom_cost(name=name, cost_cu=cost_cu)
 
 
 def check_budget_limits() -> Optional[BudgetLimitViolation]:

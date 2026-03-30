@@ -3,6 +3,7 @@
 from ._version import __version__
 from .budget import BudgetGuard
 from .client import Client
+from .core.budget_context import add_cost
 from .exceptions import (
     ActGuardError,
     ActGuardPaymentRequired,
@@ -32,6 +33,7 @@ from .tools import (
 from .tools.timeout import shutdown
 
 __all__ = [
+    "add_cost",
     "ActGuardError",
     "ActGuardPaymentRequired",
     "ActGuardToolError",

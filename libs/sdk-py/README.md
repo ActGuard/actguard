@@ -21,9 +21,9 @@ uv add actguard
 | Skipped workflow steps | Performs side effect before required step | ✅ |
 | Obeying malicious input | Untrusted text tells it to do something destructive | ✅ |
 
-## Set a runtime token limit (`client.budget_guard`)
+## Set a runtime cost limit (`client.budget_guard`)
 
-Stop a run once it crosses 50,000 tokens:
+Cap a run at 5,000 cost units (CU). 1,000 CU ~ $1.00:
 
 ```python
 from actguard import Client
@@ -48,7 +48,7 @@ guard = None
 
 try:
     with ag.run(user_id="alice"):
-        with ag.budget_guard(token_limit=50_000) as g:
+        with ag.budget_guard(name="summarise", cost_limit=5_000) as g:
             guard = g
             response = oai.chat.completions.create(
                 model="gpt-4o",
@@ -65,7 +65,7 @@ except BudgetTransportError as e:
     print(f"Budget transport failed: {e}")
 finally:
     if guard is not None:
-        print(f"Used {guard.tokens_used} tokens")
+        print(f"Used {guard.tokens_used} tokens, {guard.usd_used:.4f} USD")
 ```
 
 `ActGuardPaymentRequired` exposes structured billing fields when the gateway
@@ -86,17 +86,16 @@ Ordinary transport degradation like timeouts, SSL failures, or 5xx responses
 still degrades open quickly so the agent can continue when the gateway is
 temporarily unavailable. Background event delivery keeps its own retry budget
 via `event_timeout_s` and `event_max_retries`.
-Local runtime blocking uses `token_limit`.
 
-Set different token limits for different scopes:
+Set different cost limits for different scopes:
 
 ```python
 with ag.run(user_id="bob"):
-    with ag.budget_guard(token_limit=20_000) as guard:
+    with ag.budget_guard(name="search", cost_limit=2_000) as guard:
         ...
 
 with ag.run(user_id="carol"):
-    with ag.budget_guard(token_limit=100_000) as guard:
+    with ag.budget_guard(name="analysis", cost_limit=10_000) as guard:
         ...
 ```
 
@@ -104,9 +103,27 @@ You can also layer budget scope on a run scope:
 
 ```python
 with ag.run(user_id="alice"):
-    with ag.budget_guard(token_limit=50_000):
+    with ag.budget_guard(name="agent-loop", cost_limit=5_000):
         ...
 ```
+
+### Nested budget scopes
+
+Budget scopes can be nested. Each nested scope tracks its own cost independently,
+while all costs also accumulate to the root scope:
+
+```python
+with ag.run(user_id="alice"):
+    with ag.budget_guard(name="agent-loop", cost_limit=10_000) as root:
+        with ag.budget_guard(name="search", cost_limit=2_000) as search:
+            # costs here count toward both "search" and "agent-loop"
+            ...
+        with ag.budget_guard(name="reranker", cost_limit=1_000) as reranker:
+            ...
+    print(f"Total: {root.usd_used:.4f} USD")
+```
+
+### Async support
 
 `client.budget_guard(...)` is also an async context manager:
 
@@ -119,21 +136,23 @@ async def main():
     ag = Client.from_file("./actguard.json")
     oai = openai.AsyncOpenAI()
     async with ag.run(user_id="dave"):
-        async with ag.budget_guard(token_limit=100_000) as guard:
+        async with ag.budget_guard(name="chat", cost_limit=5_000) as guard:
             response = await oai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "Hello!"}],
             )
-    print(f"Used {guard.tokens_used} tokens")
+    print(f"Used {guard.tokens_used} tokens, {guard.usd_used:.4f} USD")
 
 asyncio.run(main())
 ```
+
+### Streaming
 
 Streaming responses are fully supported — actguard wraps the iterator transparently and captures the usage chunk emitted at the end of the stream:
 
 ```python
 with ag.run(user_id="eve"):
-    with ag.budget_guard(token_limit=100_000) as guard:
+    with ag.budget_guard(name="story", cost_limit=5_000) as guard:
         stream = oai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": "Tell me a story."}],
@@ -143,8 +162,59 @@ with ag.run(user_id="eve"):
             if chunk.choices[0].delta.content:
                 print(chunk.choices[0].delta.content, end="", flush=True)
 
-print(f"\nUsed {guard.tokens_used} tokens")
+print(f"\nUsed {guard.tokens_used} tokens, {guard.usd_used:.4f} USD")
 ```
+
+### Reading budget usage
+
+`BudgetGuard` exposes several read-only properties after (or during) execution:
+
+| Property | Description |
+|----------|-------------|
+| `tokens_used` | Total tokens used in this scope |
+| `cost_used` | Total cost in CU (cost units) |
+| `usd_used` | Total cost in USD |
+| `local_tokens_used` | Tokens used in this scope only (nested) |
+| `local_cost_used` | Cost in CU for this scope only (nested) |
+| `local_usd_used` | Cost in USD for this scope only (nested) |
+| `root_tokens_used` | Tokens used across the entire root scope |
+| `root_cost_used` | Cost in CU across the entire root scope |
+| `root_usd_used` | Cost in USD across the entire root scope |
+
+## Track external costs (`add_cost`)
+
+Use `add_cost` to manually record costs for external services that aren't
+auto-tracked by the LLM integrations (e.g., search APIs, database queries,
+third-party services):
+
+```python
+import actguard
+
+ag = actguard.Client(api_key="ag_live_agent_key")
+oai = openai.OpenAI()
+
+with ag.run(user_id="alice"):
+    with ag.budget_guard(name="agent-loop", cost_limit=5_000) as guard:
+        # LLM call (auto-tracked)
+        response = oai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Search for X"}],
+        )
+
+        # External API call (manually tracked)
+        result = tavily_client.search("query")
+        actguard.add_cost(name="tavily_search", usd=0.01)
+
+        # Database query
+        rows = db.execute("SELECT ...")
+        actguard.add_cost(name="db_query", usd=0.001)
+
+    print(f"Total: {guard.usd_used:.4f} USD")
+```
+
+`add_cost` works anywhere inside an active `budget_guard` context. The USD
+amount is converted to CU using the tariff's `cu_per_usd` rate. Custom costs
+count toward `cost_limit` enforcement just like LLM token costs.
 
 ## Rate-limit a tool
 
